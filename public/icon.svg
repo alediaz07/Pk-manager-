@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <rect width="512" height="512" rx="128" fill="#DC2626" />
+  <circle cx="256" cy="256" r="190" fill="#B91C1C" />
+  <!-- Chicken & Chef Hat Stylized Icon -->
+  <g transform="translate(106, 96)" fill="#FFFFFF">
+    <!-- Chef Hat -->
+    <path d="M 60 110 C 40 70, 90 20, 150 40 C 190 10, 240 50, 230 100 C 260 110, 260 160, 230 180 L 70 180 C 40 160, 40 120, 60 110 Z" fill="#FFFFFF" opacity="0.95" />
+    <rect x="75" y="170" width="150" height="25" rx="6" fill="#F87171" />
+    <!-- Beak and Comb -->
+    <path d="M 120 190 C 80 190, 50 230, 60 270 C 70 310, 110 330, 150 330 C 200 330, 240 290, 240 240 C 240 200, 190 190, 150 190 Z" fill="#FFFFFF" />
+    <!-- Beak -->
+    <polygon points="55,245 20,260 60,275" fill="#FBBF24" />
+    <!-- Eye -->
+    <circle cx="105" cy="235" r="9" fill="#1F2937" />
+    <circle cx="108" cy="232" r="3" fill="#FFFFFF" />
+    <!-- Wattle -->
+    <path d="M 65 275 C 65 295, 80 305, 80 285 Z" fill="#EF4444" />
+    <!-- Wing -->
+    <path d="M 140 230 C 120 250, 130 290, 175 290 C 195 290, 210 270, 205 245 C 190 220, 160 220, 140 230 Z" fill="#FEE2E2" />
+  </g>
+  <!-- Text Brand -->
+  <text x="256" y="445" font-family="system-ui, -apple-system, sans-serif" font-size="38" font-weight="900" fill="#FFFFFF" text-anchor="middle" letter-spacing="2">POLLOS KAREN</text>
+</svg>

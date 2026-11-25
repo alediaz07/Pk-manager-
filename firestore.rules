@@ -1,0 +1,237 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global default-deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Verifies administrator status via Firestore /admins/{uid} doc or master bootstrap email
+    function isAdmin() {
+      return isSignedIn() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        (request.auth.token.email != null && request.auth.token.email == 'alejandrodiazortiz07@gmail.com')
+      );
+    }
+
+    // 1. Users collection
+    match /users/{userId} {
+      allow get: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isSignedIn() && (
+        isAdmin() ||
+        (request.auth.uid == userId && incoming().role == 'colaborador')
+      ) && incoming().role in ['admin', 'colaborador'];
+
+      allow update: if isSignedIn() && (
+        isAdmin() ||
+        (request.auth.uid == userId && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'updatedAt']))
+      );
+      allow delete: if isAdmin();
+    }
+
+    // 2. Admins reference collection (Strictly admin-only write)
+    match /admins/{adminId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    // 3. Menu Categories
+    match /categories/{categoryId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    // 4. Products Catalog
+    match /products/{productId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    // 5. Tables & Barra
+    match /tables/{tableId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn();
+      allow delete: if isAdmin();
+      allow update: if isSignedIn() && (
+        isAdmin() || (
+          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'currentOrderId', 'updatedAt']) &&
+          incoming().status in ['libre', 'activa', 'pendiente_pago']
+        )
+      );
+    }
+
+    // 6. Orders
+    match /orders/{orderId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && incoming().keys().hasAll([
+        'orderNumber', 'serviceType', 'items', 'status', 'paymentStatus', 'subtotal', 'serviceCharge', 'total'
+      ]) && incoming().orderNumber is string && incoming().orderNumber.size() <= 32
+         && incoming().serviceType in ['mesa', 'ventana', 'expres']
+         && incoming().status in ['pending', 'in_kitchen', 'served', 'completed']
+         && incoming().subtotal is number && incoming().subtotal >= 0
+         && incoming().total is number && incoming().total >= 0;
+
+      allow update: if isSignedIn() && (
+        isAdmin() ||
+        (
+          // Colaborador can only update unpaid, non-cancelled orders
+          existing().paymentStatus != 'paid' && existing().status != 'cancelled' &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'orderNumber', 'tableId', 'tableName', 'items', 'observations',
+            'subtotal', 'serviceCharge', 'total', 'status',
+            'paymentStatus', 'paymentMethod', 'paidAt', 'updatedAt', 'changeHistory',
+            'inventoryDeducted', 'inventoryDeductedAt'
+          ])
+        )
+      );
+
+      // Only administrators can cancel or delete sales records
+      allow delete: if isAdmin();
+    }
+
+    // 7. Kitchen Tickets (80mm print audit)
+    match /kitchen_tickets/{ticketId} {
+      allow read, create: if isSignedIn();
+      allow update, delete: if isAdmin();
+    }
+
+    // 8. Cash Registers (Daily operational drawer)
+    match /cash_registers/{registerId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn();
+      allow update: if isSignedIn() && (
+        isAdmin() ||
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'cashSales', 'sinpeSales', 'cardSales', 'expectedCash', 'notes'
+        ])
+      );
+      allow delete: if isAdmin();
+    }
+
+    // 9. Cash Movements (Sales by staff, all movements by admin)
+    match /cash_movements/{movementId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && incoming().keys().hasAll([
+        'registerId', 'type', 'amount', 'paymentMethod', 'description', 'createdAt'
+      ]) && incoming().amount is number && (
+        isAdmin() || incoming().type == 'sale'
+      );
+      allow update, delete: if isAdmin();
+    }
+
+    // 10. Inventory Items (Admin full access; staff can read catalog & update stock upon comanda sale)
+    match /inventory_items/{itemId} {
+      allow read: if isSignedIn();
+      allow create, delete: if isAdmin();
+      allow update: if isSignedIn() && (
+        isAdmin() ||
+        incoming().diff(existing()).affectedKeys().hasOnly(['currentStock', 'updatedAt'])
+      );
+    }
+
+    // 11. Inventory Movements (Admin read/manage; staff can append consumption movements)
+    match /inventory_movements/{movementId} {
+      allow read: if isAdmin();
+      allow create: if isSignedIn() && (
+        isAdmin() || (
+          incoming().type == 'consumption' &&
+          incoming().keys().hasAll([
+            'itemId', 'itemName', 'type', 'quantity', 'previousStock', 'newStock', 'reason', 'performedBy', 'createdAt'
+          ])
+        )
+      );
+      allow update, delete: if isAdmin();
+    }
+
+    // 12. Purchases (Admin only)
+    match /purchases/{purchaseId} {
+      allow read, write: if isAdmin();
+    }
+
+    // 13. Recipes (Admin manages; staff can read recipe specs for automatic deduction)
+    match /recipes/{recipeId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    // 14. Operating Expenses (Admin only)
+    match /operating_expenses/{expenseId} {
+      allow read, write: if isAdmin();
+    }
+
+    // 15. Audit Logs (Tamper-evident log: append-only, strictly verified against real operations, no update/delete)
+    match /audit_logs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isSignedIn() &&
+        isValidId(logId) &&
+        incoming().keys().hasAll([
+          'id', 'action', 'collection', 'documentId', 'performedBy', 'performedByUid', 'performedByEmail', 'timestamp'
+        ]) &&
+        incoming().performedByUid == request.auth.uid &&
+        (
+          request.auth.token.email == null ||
+          incoming().performedByEmail == request.auth.token.email
+        ) &&
+        incoming().collection in [
+          'orders', 'cash_registers', 'inventory_items', 'operating_expenses', 'tables', 'purchases', 'cash_movements', 'recipes', 'products', 'users'
+        ] &&
+        incoming().action in [
+          'create', 'cancel_order', 'open_register', 'close_register', 'cash_count',
+          'inventory_adjustment', 'add_expense', 'pay_expense', 'waste_registration', 'waste_record',
+          'purchase_registered', 'add_purchase', 'toggle_active', 'cash_movement', 'data_restore',
+          'save_recipe', 'toggle_recipe_autodeduct', 'save_product', 'manage_user'
+        ] &&
+        // Verifiable reality: Document MUST exist or have been created in this transaction batch
+        (
+          exists(/databases/$(database)/documents/$(incoming().collection)/$(incoming().documentId)) ||
+          existsAfter(/databases/$(database)/documents/$(incoming().collection)/$(incoming().documentId))
+        ) &&
+        // Administrative actions strictly require admin credentials
+        (
+          isAdmin() ||
+          !(incoming().action in [
+            'open_register', 'close_register', 'cash_count', 'inventory_adjustment',
+            'add_expense', 'pay_expense', 'purchase_registered', 'add_purchase', 'data_restore',
+            'save_recipe', 'toggle_recipe_autodeduct', 'save_product', 'manage_user', 'waste_record'
+          ])
+        ) &&
+        incoming().action is string && incoming().action.size() > 0 && incoming().action.size() <= 64 &&
+        incoming().collection is string && incoming().collection.size() > 0 && incoming().collection.size() <= 64 &&
+        incoming().documentId is string && incoming().documentId.size() > 0 && incoming().documentId.size() <= 128 &&
+        incoming().performedBy is string && incoming().performedBy.size() <= 128 &&
+        incoming().performedByEmail is string && incoming().performedByEmail.size() <= 128 &&
+        incoming().timestamp is string && incoming().timestamp.size() <= 64;
+      allow update, delete: if false;
+    }
+
+    // 16. Unique Purchase Invoice Registry / Lock (Anti-concurrency duplicate prevention)
+    match /purchase_invoice_locks/{lockId} {
+      allow read: if isSignedIn();
+      allow create: if isAdmin() &&
+        isValidId(lockId) &&
+        incoming().keys().hasAll(['vendor', 'purchaseNumber', 'purchaseId', 'total', 'registeredAt']) &&
+        !exists(/databases/$(database)/documents/purchase_invoice_locks/$(lockId));
+      allow update: if false;
+      allow delete: if isAdmin();
+    }
+  }
+}

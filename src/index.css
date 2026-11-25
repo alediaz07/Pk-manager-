@@ -1,0 +1,27 @@
+@import "tailwindcss";
+
+@layer base {
+  html, body {
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
+}
+
+/* 80mm Kitchen Thermal Printer Styles */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  .print-ticket-area, .print-ticket-area * {
+    visibility: visible;
+  }
+  .print-ticket-area {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 80mm;
+  }
+}

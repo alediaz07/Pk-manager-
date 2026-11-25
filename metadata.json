@@ -1,0 +1,8 @@
+{
+  "name": "Pollos Karen Manager",
+  "description": "Sistema integral de punto de venta, gestión de mesas, caja general, inventario, facturación con IA y finanzas para Pollos Karen.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
