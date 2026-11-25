@@ -3,6 +3,13 @@ import { usePOS } from '../../context/POSContext';
 import { useAuth } from '../../context/AuthContext';
 import { ProductItem, ServiceType, CasadoProtein, RestaurantTable, RestaurantOrder } from '../../types';
 import { formatCRC } from '../../utils/formatters';
+import {
+  FINANCIAL_STATUS_LABELS,
+  OPERATIONAL_STATUS_LABELS,
+  resolveFinancialStatus,
+  resolveOperationalStatus,
+} from '../../utils/orderStateMachine';
+import { printPreCuenta } from '../../utils/thermalPrinter';
 import { CasadoProteinModal } from './CasadoProteinModal';
 import { PaymentModal } from './PaymentModal';
 import { KitchenTicketModal } from './KitchenTicketModal';
@@ -24,9 +31,12 @@ import {
   Sparkles,
   Search,
   ClipboardList,
-  RotateCcw,
   Ban,
   FilePlus2,
+  ArrowRightLeft,
+  BellRing,
+  Receipt,
+  PackageCheck,
 } from 'lucide-react';
 
 export const POSView: React.FC = () => {
@@ -37,6 +47,10 @@ export const POSView: React.FC = () => {
     selectedTable,
     selectTable,
     orders,
+    pendingPublicOrders,
+    acceptPublicOrder,
+    rejectPublicOrder,
+    restaurantConfig,
     currentOrder,
     setCurrentOrder,
     createNewOrder,
@@ -44,8 +58,11 @@ export const POSView: React.FC = () => {
     updateOrderItemQuantity,
     removeOrderItem,
     setOrderObservations,
+    setOrderDeliveryDetails,
     saveActiveOrder,
     updateOrderStatus,
+    markOrderDelivered,
+    transferTableOrder,
     cancelOrder,
     printOrderTicket,
     activeTicketToPrint,
@@ -58,9 +75,13 @@ export const POSView: React.FC = () => {
   const [casadoModalProduct, setCasadoModalProduct] = useState<ProductItem | null>(null);
   const [isPaymentModalOpen, setIsPaymentModalOpen] = useState<boolean>(false);
   const [isActiveOrdersOpen, setIsActiveOrdersOpen] = useState<boolean>(false);
+  const [isPendingPublicOpen, setIsPendingPublicOpen] = useState<boolean>(false);
+  const [isTransferModalOpen, setIsTransferModalOpen] = useState<boolean>(false);
+  const [transferTargetTableId, setTransferTargetTableId] = useState<string>('');
   const [orderToPay, setOrderToPay] = useState<RestaurantOrder | null>(null);
   const [isCancelConfirmOpen, setIsCancelConfirmOpen] = useState<boolean>(false);
   const [cancelReasonInput, setCancelReasonInput] = useState<string>('');
+  const [cancelDisposition, setCancelDisposition] = useState<'restored' | 'waste' | 'none'>('restored');
   const [isNotesOpen, setIsNotesOpen] = useState<boolean>(false);
   const [isSavingOrder, setIsSavingOrder] = useState<boolean>(false);
   const [saveFeedback, setSaveFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
@@ -167,9 +188,10 @@ export const POSView: React.FC = () => {
     if (!currentOrder || !cancelReasonInput.trim()) return;
 
     try {
-      await cancelOrder(currentOrder.id, cancelReasonInput.trim());
+      await cancelOrder(currentOrder.id, cancelReasonInput.trim(), cancelDisposition);
       setIsCancelConfirmOpen(false);
       setCancelReasonInput('');
+      setCancelDisposition('restored');
       setSaveFeedback({
         type: 'success',
         message: `Comanda ${currentOrder.orderNumber} anulada correctamente.`,
@@ -178,6 +200,27 @@ export const POSView: React.FC = () => {
       setSaveFeedback({
         type: 'error',
         message: err.message || 'Error al anular la orden.',
+      });
+    }
+  };
+
+  const handleConfirmTransferTable = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!currentOrder || !transferTargetTableId) return;
+    const res = await transferTableOrder(currentOrder.id, transferTargetTableId);
+    if (res.success) {
+      const target = tables.find(t => t.id === transferTargetTableId);
+      if (target) selectTable(target);
+      setIsTransferModalOpen(false);
+      setTransferTargetTableId('');
+      setSaveFeedback({
+        type: 'success',
+        message: `Comanda transferida a ${target?.name || 'la nueva mesa'}.`,
+      });
+    } else {
+      setSaveFeedback({
+        type: 'error',
+        message: res.error || 'No se pudo transferir la mesa.',
       });
     }
   };
@@ -244,6 +287,25 @@ export const POSView: React.FC = () => {
             <span>Comandas ({activeUnpaidOrders.length})</span>
           </button>
         </div>
+
+        {/* Pending Public QR / Exprés Approval Banner */}
+        {pendingPublicOrders.length > 0 && (
+          <div className="mb-3 bg-amber-50 border border-amber-300 rounded-2xl p-3 flex items-center justify-between gap-2 text-xs">
+            <div className="flex items-center gap-2 font-bold text-amber-950">
+              <BellRing className="w-4 h-4 text-amber-600 animate-bounce shrink-0" />
+              <span>
+                {pendingPublicOrders.length} pedido(s) nuevo(s) desde Menú Digital / QR esperando autorización para cocina.
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setIsPendingPublicOpen(true)}
+              className="px-3 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-black text-xs shrink-0 transition"
+            >
+              Revisar y Autorizar
+            </button>
+          </div>
+        )}
 
         {/* Mesa Picker Selector when service is Mesa */}
         {activeServiceType === 'mesa' && (
@@ -384,29 +446,41 @@ export const POSView: React.FC = () => {
                 {currentOrder?.tableName ? ` • ${currentOrder.tableName}` : ''}
               </span>
             </div>
-            <div className="text-[11px] text-gray-500 mt-0.5 flex items-center gap-2">
-              <span>{currentOrder ? `${currentOrder.items.length} productos en comanda` : 'Seleccione productos'}</span>
+            <div className="text-[11px] text-gray-500 mt-0.5 flex items-center gap-1.5 flex-wrap">
+              <span>{currentOrder ? `${currentOrder.items.length} prod.` : 'Seleccione productos'}</span>
               {currentOrder && (
-                <span
-                  className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded ${
-                    currentOrder.status === 'in_kitchen'
-                      ? 'bg-amber-100 text-amber-800'
-                      : currentOrder.status === 'served'
-                      ? 'bg-blue-100 text-blue-800'
-                      : 'bg-gray-200 text-gray-700'
-                  }`}
-                >
-                  {currentOrder.status === 'in_kitchen'
-                    ? 'En Cocina'
-                    : currentOrder.status === 'served'
-                    ? 'Servida'
-                    : 'Borrador'}
-                </span>
+                <>
+                  <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-amber-100 text-amber-900">
+                    {OPERATIONAL_STATUS_LABELS[resolveOperationalStatus(currentOrder)]}
+                  </span>
+                  <span
+                    className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded ${
+                      resolveFinancialStatus(currentOrder) === 'paid'
+                        ? 'bg-emerald-100 text-emerald-800'
+                        : 'bg-gray-200 text-gray-700'
+                    }`}
+                  >
+                    {FINANCIAL_STATUS_LABELS[resolveFinancialStatus(currentOrder)]}
+                  </span>
+                </>
               )}
             </div>
           </div>
 
           <div className="flex items-center gap-1">
+            {currentOrder?.serviceType === 'mesa' && currentOrder.items.length > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  setTransferTargetTableId('');
+                  setIsTransferModalOpen(true);
+                }}
+                className="p-2 rounded-xl text-xs font-bold bg-white text-gray-600 border border-gray-200 hover:bg-gray-100 transition"
+                title="Transferir comanda a otra mesa"
+              >
+                <ArrowRightLeft className="w-4 h-4" />
+              </button>
+            )}
             <button
               onClick={handleStartFreshOrder}
               className="p-2 rounded-xl text-xs font-bold bg-white text-gray-600 border border-gray-200 hover:bg-gray-100 transition"
@@ -427,6 +501,71 @@ export const POSView: React.FC = () => {
             </button>
           </div>
         </div>
+
+        {/* Exprés Delivery Details Panel */}
+        {currentOrder?.serviceType === 'expres' && (
+          <div className="p-3 bg-blue-50/70 border-b border-blue-200 text-xs space-y-2">
+            <div className="flex items-center justify-between font-bold text-blue-950">
+              <span className="flex items-center gap-1.5">
+                <Bike className="w-3.5 h-3.5 text-blue-700" />
+                Datos Envío Exprés (Radio ≤ {restaurantConfig.expressMaxRadiusKm} km)
+              </span>
+              <span className="text-[11px] bg-blue-100 text-blue-900 px-2 py-0.5 rounded-md">
+                Tarifa: {formatCRC(restaurantConfig.expressDeliveryFee)}
+              </span>
+            </div>
+            <div className="grid grid-cols-2 gap-1.5">
+              <input
+                type="text"
+                value={currentOrder.deliveryDetails?.customerName || ''}
+                onChange={e =>
+                  setOrderDeliveryDetails({
+                    customerName: e.target.value,
+                    customerPhone: currentOrder.deliveryDetails?.customerPhone || '',
+                    address: currentOrder.deliveryDetails?.address || '',
+                    reference: currentOrder.deliveryDetails?.reference || '',
+                    deliveryFee: restaurantConfig.expressDeliveryFee,
+                    withinCoverage1Km: currentOrder.deliveryDetails?.withinCoverage1Km ?? true,
+                  })
+                }
+                placeholder="Nombre cliente"
+                className="px-2.5 py-1.5 bg-white rounded-lg border border-blue-200 text-xs"
+              />
+              <input
+                type="tel"
+                value={currentOrder.deliveryDetails?.customerPhone || ''}
+                onChange={e =>
+                  setOrderDeliveryDetails({
+                    customerName: currentOrder.deliveryDetails?.customerName || '',
+                    customerPhone: e.target.value,
+                    address: currentOrder.deliveryDetails?.address || '',
+                    reference: currentOrder.deliveryDetails?.reference || '',
+                    deliveryFee: restaurantConfig.expressDeliveryFee,
+                    withinCoverage1Km: currentOrder.deliveryDetails?.withinCoverage1Km ?? true,
+                  })
+                }
+                placeholder="Teléfono"
+                className="px-2.5 py-1.5 bg-white rounded-lg border border-blue-200 text-xs"
+              />
+            </div>
+            <input
+              type="text"
+              value={currentOrder.deliveryDetails?.address || ''}
+              onChange={e =>
+                setOrderDeliveryDetails({
+                  customerName: currentOrder.deliveryDetails?.customerName || '',
+                  customerPhone: currentOrder.deliveryDetails?.customerPhone || '',
+                  address: e.target.value,
+                  reference: currentOrder.deliveryDetails?.reference || '',
+                  deliveryFee: restaurantConfig.expressDeliveryFee,
+                  withinCoverage1Km: currentOrder.deliveryDetails?.withinCoverage1Km ?? true,
+                })
+              }
+              placeholder="Dirección exacta en La Uruca / punto de referencia"
+              className="w-full px-2.5 py-1.5 bg-white rounded-lg border border-blue-200 text-xs"
+            />
+          </div>
+        )}
 
         {/* Observations box toggle */}
         {isNotesOpen && (
@@ -516,11 +655,16 @@ export const POSView: React.FC = () => {
               <span className="font-semibold">{formatCRC(currentOrder?.subtotal || 0)}</span>
             </div>
 
-            {/* Service Charge (10% ONLY for mesa) */}
+            {/* Service Charge (10% ONLY for mesa) or Delivery Fee (ONLY for expres) */}
             {currentOrder?.serviceType === 'mesa' ? (
               <div className="flex justify-between text-red-700 font-bold">
                 <span>Servicio de Mesa (10%):</span>
                 <span>{formatCRC(currentOrder?.serviceCharge || 0)}</span>
+              </div>
+            ) : currentOrder?.serviceType === 'expres' ? (
+              <div className="flex justify-between text-blue-700 font-bold">
+                <span>Tarifa Envío Exprés:</span>
+                <span>{formatCRC(currentOrder?.deliveryFee || 0)}</span>
               </div>
             ) : (
               <div className="flex justify-between text-gray-400 text-[11px]">
@@ -565,7 +709,7 @@ export const POSView: React.FC = () => {
               ) : (
                 <Printer className="w-3.5 h-3.5" />
               )}
-              <span>Imprimir Ticket</span>
+              <span>Imprimir Cocina</span>
             </button>
 
             <button
@@ -578,18 +722,38 @@ export const POSView: React.FC = () => {
               ) : (
                 <Save className="w-3.5 h-3.5 text-red-600" />
               )}
-              <span>{isSavingOrder ? 'Guardando...' : 'Guardar Orden'}</span>
+              <span>{isSavingOrder ? 'Guardando...' : 'Guardar / Autorizar'}</span>
             </button>
           </div>
 
-          {/* Quick status button or cancel */}
-          {currentOrder && currentOrder.status === 'in_kitchen' && (
-            <button
-              onClick={() => updateOrderStatus(currentOrder.id, 'served')}
-              className="w-full py-2 bg-blue-50 text-blue-700 hover:bg-blue-100 font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 border border-blue-200 transition"
-            >
-              <span>Marcar como Servido / Despachado</span>
-            </button>
+          {/* Precuenta & Operational Delivery separation */}
+          {currentOrder && currentOrder.items.length > 0 && (
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => printPreCuenta(currentOrder, restaurantConfig.printerWidth)}
+                className="py-2 px-2 bg-white hover:bg-gray-100 text-gray-700 font-bold text-[11px] rounded-xl flex items-center justify-center gap-1 border border-gray-200 transition"
+              >
+                <Receipt className="w-3.5 h-3.5 text-gray-500" />
+                <span>Precuenta</span>
+              </button>
+
+              {resolveOperationalStatus(currentOrder) !== 'delivered' &&
+              resolveOperationalStatus(currentOrder) !== 'cancelled' ? (
+                <button
+                  type="button"
+                  onClick={() => markOrderDelivered(currentOrder.id)}
+                  className="py-2 px-2 bg-blue-50 text-blue-700 hover:bg-blue-100 font-bold text-[11px] rounded-xl flex items-center justify-center gap-1 border border-blue-200 transition"
+                >
+                  <PackageCheck className="w-3.5 h-3.5" />
+                  <span>Marcar Entregada</span>
+                </button>
+              ) : (
+                <div className="py-2 px-2 bg-emerald-50 text-emerald-700 font-bold text-[11px] rounded-xl flex items-center justify-center border border-emerald-200">
+                  Entregada
+                </div>
+              )}
+            </div>
           )}
 
           {/* Main Checkout Button */}
@@ -655,8 +819,8 @@ export const POSView: React.FC = () => {
           onUpdateStatus={(orderId, status) => {
             updateOrderStatus(orderId, status);
           }}
-          onCancelOrder={(orderId, reason) => {
-            cancelOrder(orderId, reason);
+          onCancelOrder={(orderId, reason, disposition) => {
+            cancelOrder(orderId, reason, disposition);
           }}
         />
       )}
@@ -671,7 +835,6 @@ export const POSView: React.FC = () => {
             setOrderToPay(null);
           }}
           onSuccess={() => {
-            // Reset order
             const nextOrder = createNewOrder('mesa');
             setCurrentOrder(nextOrder);
             setOrderToPay(null);
@@ -687,24 +850,168 @@ export const POSView: React.FC = () => {
         />
       )}
 
-      {/* Cancel Comanda Modal (Admin confirmation with reason) */}
+      {/* Pending Public QR / Exprés Orders Approval Modal */}
+      {isPendingPublicOpen && (
+        <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/60 p-4">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-4 max-h-[85vh] overflow-y-auto text-xs">
+            <div className="flex items-center justify-between pb-3 border-b border-gray-100">
+              <div>
+                <h3 className="font-black text-lg text-gray-900">
+                  Pedidos Pendientes (QR Mesa / Exprés)
+                </h3>
+                <p className="text-[11px] text-gray-500">
+                  Ningún pedido digital entra a cocina sin su autorización explícita.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsPendingPublicOpen(false)}
+                className="px-2.5 py-1 rounded-xl bg-gray-100 font-bold text-gray-700"
+              >
+                Cerrar
+              </button>
+            </div>
+
+            {pendingPublicOrders.length === 0 ? (
+              <p className="text-center text-gray-400 py-8">No hay pedidos pendientes.</p>
+            ) : (
+              <div className="space-y-3">
+                {pendingPublicOrders.map(po => (
+                  <div
+                    key={po.trackingCode}
+                    className="bg-amber-50/70 border border-amber-200 rounded-2xl p-4 space-y-2"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="font-black text-sm text-gray-900">
+                        {po.trackingCode} •{' '}
+                        {po.serviceType === 'mesa' ? po.tableName || 'Mesa QR' : 'Pedido Exprés'}
+                      </span>
+                      <span className="font-black text-sm text-red-600">{formatCRC(po.total)}</span>
+                    </div>
+
+                    <div className="text-gray-700 space-y-0.5">
+                      {po.items.map((it, idx) => (
+                        <div key={idx}>
+                          <strong>{it.quantity}x</strong> {it.name}
+                          {it.protein ? ` (${it.protein})` : ''}
+                          {it.notes ? ` — ${it.notes}` : ''}
+                        </div>
+                      ))}
+                    </div>
+
+                    {po.deliveryDetails && (
+                      <div className="bg-white p-2 rounded-xl border border-amber-200 text-[11px] text-gray-700">
+                        <strong>Cliente:</strong> {po.deliveryDetails.customerName} ({po.deliveryDetails.customerPhone})<br />
+                        <strong>Dirección:</strong> {po.deliveryDetails.address}
+                      </div>
+                    )}
+
+                    <div className="flex items-center gap-2 pt-2">
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await rejectPublicOrder(po.trackingCode);
+                          setSaveFeedback({ type: 'success', message: `Pedido ${po.trackingCode} rechazado.` });
+                        }}
+                        className="flex-1 py-2 rounded-xl border border-red-300 text-red-700 font-bold hover:bg-red-50"
+                      >
+                        Rechazar
+                      </button>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const res = await acceptPublicOrder(po.trackingCode);
+                          if (res.success && res.order) {
+                            setSaveFeedback({
+                              type: 'success',
+                              message: `Pedido ${po.trackingCode} autorizado como ${res.order.orderNumber} y enviado a Cocina.`,
+                            });
+                            if (pendingPublicOrders.length <= 1) setIsPendingPublicOpen(false);
+                          } else {
+                            setSaveFeedback({
+                              type: 'error',
+                              message: res.error || 'No se pudo autorizar el pedido.',
+                            });
+                          }
+                        }}
+                        className="flex-1 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-black shadow-xs"
+                      >
+                        Autorizar a Cocina
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Transfer Table Modal */}
+      {isTransferModalOpen && currentOrder && (
+        <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/60 p-4">
+          <form
+            onSubmit={handleConfirmTransferTable}
+            className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl space-y-4 text-xs"
+          >
+            <h3 className="font-black text-lg text-gray-900">
+              Transferir {currentOrder.orderNumber} a otra Mesa
+            </h3>
+            <p className="text-gray-500">
+              Seleccione una mesa libre para mover esta comanda sin perder sus productos ni su historial.
+            </p>
+            <select
+              required
+              value={transferTargetTableId}
+              onChange={e => setTransferTargetTableId(e.target.value)}
+              className="w-full px-3 py-2.5 rounded-xl border border-gray-300 bg-white font-bold"
+            >
+              <option value="">-- Seleccionar mesa libre --</option>
+              {tables
+                .filter(t => t.active && t.status === 'libre' && t.id !== currentOrder.tableId)
+                .map(t => (
+                  <option key={t.id} value={t.id}>
+                    {t.name}
+                  </option>
+                ))}
+            </select>
+            <div className="flex items-center gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setIsTransferModalOpen(false)}
+                className="flex-1 py-2.5 rounded-xl border border-gray-200 font-bold text-gray-700"
+              >
+                Cancelar
+              </button>
+              <button
+                type="submit"
+                className="flex-1 py-2.5 rounded-xl bg-gray-900 hover:bg-black text-white font-bold"
+              >
+                Transferir
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Cancel Comanda Modal (Admin confirmation with reason + inventory disposition) */}
       {isCancelConfirmOpen && currentOrder && (
         <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/60 p-4 animate-in fade-in duration-200">
           <form
             onSubmit={handleConfirmCancelOrder}
-            className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl space-y-4"
+            className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-4"
           >
             <div className="flex items-center gap-2 text-red-600">
               <Ban className="w-5 h-5" />
               <h3 className="font-black text-lg text-gray-900">Anular Orden {currentOrder.orderNumber}</h3>
             </div>
             <p className="text-xs text-gray-500">
-              La orden será anulada y la mesa {currentOrder.tableName || ''} será liberada automáticamente en salón.
+              La orden será anulada, la mesa {currentOrder.tableName || ''} será liberada y el evento quedará en auditoría.
             </p>
 
             <div>
               <label className="block text-xs font-bold text-gray-700 mb-1">
-                Motivo de anulación:
+                Motivo obligatorio de anulación:
               </label>
               <input
                 type="text"
@@ -714,6 +1021,48 @@ export const POSView: React.FC = () => {
                 placeholder="Ej. Cliente canceló pedido..."
                 className="w-full px-3 py-2 rounded-xl border border-gray-300 text-xs focus:ring-2 focus:ring-red-500 focus:outline-none"
               />
+            </div>
+
+            <div className="space-y-1.5 text-xs">
+              <label className="block font-bold text-gray-700">
+                Disposición de insumos en inventario:
+              </label>
+              <label className="flex items-start gap-2 p-2.5 rounded-xl border border-gray-200 cursor-pointer hover:bg-gray-50">
+                <input
+                  type="radio"
+                  name="invDisp"
+                  checked={cancelDisposition === 'restored'}
+                  onChange={() => setCancelDisposition('restored')}
+                  className="mt-0.5 text-red-600"
+                />
+                <span>
+                  <strong>No se preparó en cocina:</strong> restituir insumos al inventario.
+                </span>
+              </label>
+              <label className="flex items-start gap-2 p-2.5 rounded-xl border border-gray-200 cursor-pointer hover:bg-gray-50">
+                <input
+                  type="radio"
+                  name="invDisp"
+                  checked={cancelDisposition === 'waste'}
+                  onChange={() => setCancelDisposition('waste')}
+                  className="mt-0.5 text-red-600"
+                />
+                <span>
+                  <strong>Ya se preparó / cocinó:</strong> registrar como merma (NO devolver al stock).
+                </span>
+              </label>
+              <label className="flex items-start gap-2 p-2.5 rounded-xl border border-gray-200 cursor-pointer hover:bg-gray-50">
+                <input
+                  type="radio"
+                  name="invDisp"
+                  checked={cancelDisposition === 'none'}
+                  onChange={() => setCancelDisposition('none')}
+                  className="mt-0.5 text-red-600"
+                />
+                <span>
+                  <strong>Sin movimiento de inventario.</strong>
+                </span>
+              </label>
             </div>
 
             <div className="flex items-center gap-2 pt-2">

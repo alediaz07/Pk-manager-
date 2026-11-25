@@ -1,8 +1,8 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
-import {defineConfig} from 'vite';
-import {VitePWA} from 'vite-plugin-pwa';
+import { defineConfig } from 'vite';
+import { VitePWA } from 'vite-plugin-pwa';
 
 export default defineConfig(() => {
   return {
@@ -10,13 +10,15 @@ export default defineConfig(() => {
       react(),
       tailwindcss(),
       VitePWA({
-        registerType: 'autoUpdate',
+        // Prompt mode ensures active POS orders/payments are NEVER interrupted by an abrupt reload
+        registerType: 'prompt',
         includeAssets: ['favicon.ico', 'apple-touch-icon.png', 'icon.svg'],
         manifest: {
           id: '/',
           name: 'Pollos Karen Manager',
           short_name: 'PollosKaren',
-          description: 'Sistema integral de punto de venta, inventario y finanzas para Pollos Karen.',
+          description:
+            'Sistema interno de punto de venta, cocina (KDS), inventario y finanzas para Pollos Karen.',
           theme_color: '#DC2626',
           background_color: '#FFFFFF',
           display: 'standalone',
@@ -45,9 +47,17 @@ export default defineConfig(() => {
         },
         workbox: {
           maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
+          // Never cache backend API routes or Firestore private endpoints in the SW shell
+          navigateFallbackDenylist: [/^\/api\//],
+          runtimeCaching: [
+            {
+              urlPattern: ({ url }) => url.pathname.startsWith('/api/'),
+              handler: 'NetworkOnly',
+            },
+          ],
         },
         devOptions: {
-          enabled: true,
+          enabled: false,
           type: 'module',
         },
       }),

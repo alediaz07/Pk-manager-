@@ -15,7 +15,7 @@ import {
 } from 'lucide-react';
 
 export const ExpensesView: React.FC = () => {
-  const { expenses, addExpense, markExpensePaid } = usePOS();
+  const { expenses, addExpense, markExpensePaid, hasOpenCashRegister } = usePOS();
   const { isAdmin } = useAuth();
 
   const [isAddOpen, setIsAddOpen] = useState(false);
@@ -25,6 +25,7 @@ export const ExpensesView: React.FC = () => {
   const [frequency, setFrequency] = useState<ExpenseFrequency>('mensual');
   const [dueDate, setDueDate] = useState(getCostaRicaDateString());
   const [paidFromCash, setPaidFromCash] = useState(true);
+  const [banner, setBanner] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   if (!isAdmin) {
     return (
@@ -128,6 +129,30 @@ export const ExpensesView: React.FC = () => {
           </button>
         </div>
 
+        {banner && (
+          <div
+            className={`p-3.5 rounded-2xl border text-xs font-bold flex items-center justify-between ${
+              banner.type === 'success'
+                ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                : 'bg-red-50 border-red-200 text-red-900'
+            }`}
+          >
+            <span>{banner.text}</span>
+            <button type="button" onClick={() => setBanner(null)} className="underline ml-3">
+              Cerrar
+            </button>
+          </div>
+        )}
+
+        {!hasOpenCashRegister && (
+          <div className="bg-amber-50 border border-amber-200 text-amber-900 rounded-2xl p-3.5 text-xs font-semibold flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+            <span>
+              La caja diaria está cerrada. Los gastos marcados para descontar de caja solo podrán pagarse cuando abra la caja del día.
+            </span>
+          </div>
+        )}
+
         {/* Expenses Grid */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {expenses.map(exp => {
@@ -172,9 +197,18 @@ export const ExpensesView: React.FC = () => {
                       <div className="flex items-center gap-1.5">
                         <button
                           type="button"
-                          onClick={() => {
-                            markExpensePaid(exp.id, 'efectivo', exp.paidFromCashRegister);
-                            setConfirmingPayId(null);
+                          onClick={async () => {
+                            try {
+                              await markExpensePaid(exp.id, 'efectivo', exp.paidFromCashRegister);
+                              setConfirmingPayId(null);
+                              setBanner({ type: 'success', text: `Gasto "${exp.name}" marcado como pagado.` });
+                            } catch (err: any) {
+                              setConfirmingPayId(null);
+                              setBanner({
+                                type: 'error',
+                                text: err?.message || 'No se pudo registrar el pago del gasto.',
+                              });
+                            }
                           }}
                           className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold text-[11px] shadow-xs transition"
                         >
@@ -244,8 +278,15 @@ export const ExpensesView: React.FC = () => {
                   <option value="agua">Agua</option>
                   <option value="gas">Gas</option>
                   <option value="internet">Internet</option>
+                  <option value="planilla">Planilla / Salarios</option>
+                  <option value="ccss">CCSS / Cargas Sociales</option>
+                  <option value="polizas">Pólizas / INS</option>
+                  <option value="mantenimiento">Mantenimiento</option>
+                  <option value="transporte">Transporte / Exprés</option>
+                  <option value="publicidad">Publicidad / Marketing</option>
+                  <option value="empaques">Empaques y Desechables</option>
                   <option value="servicios">Servicios</option>
-                  <option value="permisos">Permisos</option>
+                  <option value="permisos">Permisos / Patentes</option>
                   <option value="otros">Otros</option>
                 </select>
               </div>
@@ -259,6 +300,7 @@ export const ExpensesView: React.FC = () => {
                 >
                   <option value="mensual">Mensual</option>
                   <option value="quincenal">Quincenal</option>
+                  <option value="semanal">Semanal</option>
                   <option value="anual">Anual</option>
                   <option value="unico">Pago Único</option>
                 </select>

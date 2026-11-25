@@ -1,54 +1,149 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { usePOS } from '../../context/POSContext';
 import { useAuth } from '../../context/AuthContext';
-import { formatCRC, formatDateTime, getCostaRicaDateString } from '../../utils/formatters';
+import { formatCRC, formatDateTime } from '../../utils/formatters';
+import {
+  CR_DENOMINATIONS,
+  calculateDenominationsTotal,
+  calculateExpectedCash,
+} from '../../utils/orderStateMachine';
+import { printCashCloseReport } from '../../utils/thermalPrinter';
+import { DenominationCount } from '../../types';
 import {
   Coins,
   Banknote,
   Smartphone,
   CreditCard,
-  ArrowDownRight,
-  ArrowUpRight,
-  Clock,
   Calculator,
-  AlertCircle,
-  FileText,
+  AlertTriangle,
   Lock,
+  Printer,
+  ArrowDownCircle,
+  ArrowUpCircle,
+  RotateCcw,
+  CheckCircle2,
+  DoorOpen,
 } from 'lucide-react';
 
 export const CashRegisterView: React.FC = () => {
-  const { cashRegister, cashMovements, recordPhysicalCount, openNewDayRegister } = usePOS();
+  const {
+    cashRegister,
+    activeCashRegister,
+    hasOpenCashRegister,
+    staleOpenRegisters,
+    cashRegistersHistory,
+    cashMovements,
+    openNewDayRegister,
+    closeCashRegister,
+    reopenCashRegister,
+    recordCashDrawerMovement,
+    restaurantConfig,
+  } = usePOS();
   const { isAdmin } = useAuth();
 
-  const [physicalCountInput, setPhysicalCountInput] = useState<number>(cashRegister.expectedCash);
-  const [countNotes, setCountNotes] = useState<string>('');
+  const [openFloat, setOpenFloat] = useState<number>(30000);
+  const [closingCounts, setClosingCounts] = useState<Record<number, number>>({});
+  const [useDenominations, setUseDenominations] = useState(false);
+  const [manualCountInput, setManualCountInput] = useState<number>(0);
+  const [closeNotes, setCloseNotes] = useState<string>('');
   const [filterType, setFilterType] = useState<string>('all');
-  const [isOpeningShift, setIsOpeningShift] = useState(false);
-  const [newShiftFloat, setNewShiftFloat] = useState(50000);
-  const [countSavedMessage, setCountSavedMessage] = useState<string | null>(null);
+  const [feedback, setFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
-  const handleSavePhysicalCount = async (e: React.FormEvent) => {
+  // Manual deposit/withdrawal modal
+  const [drawerAction, setDrawerAction] = useState<'deposit' | 'withdrawal' | null>(null);
+  const [drawerAmount, setDrawerAmount] = useState<number>(0);
+  const [drawerReason, setDrawerReason] = useState<string>('');
+
+  // Reopen modal
+  const [reopenTargetId, setReopenTargetId] = useState<string | null>(null);
+  const [reopenReason, setReopenReason] = useState<string>('');
+
+  const expectedCash = activeCashRegister ? calculateExpectedCash(activeCashRegister) : 0;
+
+  useEffect(() => {
+    setManualCountInput(expectedCash);
+  }, [expectedCash]);
+
+  const denominationsList: DenominationCount[] = CR_DENOMINATIONS.map(d => ({
+    denomination: d,
+    count: closingCounts[d] || 0,
+  })).filter(d => d.count > 0);
+
+  const countedCash = useDenominations
+    ? calculateDenominationsTotal(denominationsList)
+    : manualCountInput;
+
+  const handleOpenShift = async (e: React.FormEvent) => {
     e.preventDefault();
+    setFeedback(null);
     try {
-      await recordPhysicalCount(physicalCountInput, countNotes);
-      setCountSavedMessage('Arqueo físico guardado exitosamente.');
-      setTimeout(() => setCountSavedMessage(null), 4000);
+      await openNewDayRegister(openFloat);
+      setFeedback({ type: 'ok', text: `Turno de caja abierto con fondo inicial de ${formatCRC(openFloat)}.` });
     } catch (err: any) {
-      setCountSavedMessage(err?.message || 'Error al guardar arqueo.');
+      setFeedback({ type: 'err', text: err?.message || 'Error abriendo turno.' });
     }
   };
 
-  const handleOpenNewShift = (e: React.FormEvent) => {
+  const handleCloseShift = async (e: React.FormEvent) => {
     e.preventDefault();
-    openNewDayRegister(newShiftFloat);
-    setIsOpeningShift(false);
+    setFeedback(null);
+    const res = await closeCashRegister(
+      countedCash,
+      closeNotes,
+      useDenominations ? denominationsList : undefined
+    );
+    if (res.success && res.register) {
+      setFeedback({
+        type: 'ok',
+        text: `Turno cerrado. Diferencia: ${formatCRC(res.register.difference || 0)}.`,
+      });
+      setCloseNotes('');
+      setClosingCounts({});
+    } else {
+      setFeedback({ type: 'err', text: res.error || 'Error cerrando turno.' });
+    }
+  };
+
+  const handleDrawerMovement = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!drawerAction) return;
+    setFeedback(null);
+    try {
+      await recordCashDrawerMovement(drawerAction, drawerAmount, drawerReason);
+      setFeedback({
+        type: 'ok',
+        text: `${drawerAction === 'deposit' ? 'Ingreso' : 'Retiro'} de ${formatCRC(drawerAmount)} registrado.`,
+      });
+      setDrawerAction(null);
+      setDrawerAmount(0);
+      setDrawerReason('');
+    } catch (err: any) {
+      setFeedback({ type: 'err', text: err?.message || 'Error registrando movimiento.' });
+    }
+  };
+
+  const handleReopen = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!reopenTargetId) return;
+    setFeedback(null);
+    try {
+      await reopenCashRegister(reopenTargetId, reopenReason);
+      setFeedback({ type: 'ok', text: 'Turno reabierto con registro de auditoría.' });
+      setReopenTargetId(null);
+      setReopenReason('');
+    } catch (err: any) {
+      setFeedback({ type: 'err', text: err?.message || 'Error reabriendo turno.' });
+    }
   };
 
   const filteredMovements = cashMovements.filter(
-    m => filterType === 'all' || m.type === filterType
+    m =>
+      (!activeCashRegister || m.registerId === activeCashRegister.id) &&
+      (filterType === 'all' || m.type === filterType)
   );
 
-  const totalSales = cashRegister.cashSales + cashRegister.sinpeSales + cashRegister.cardSales;
+  const totalSales =
+    (cashRegister.cashSales || 0) + (cashRegister.sinpeSales || 0) + (cashRegister.cardSales || 0);
 
   return (
     <div className="flex-1 overflow-y-auto p-4 md:p-6 bg-gray-100 space-y-6">
@@ -58,244 +153,331 @@ export const CashRegisterView: React.FC = () => {
           <div>
             <div className="flex items-center gap-2">
               <span className="text-xs font-bold text-red-600 uppercase tracking-wider bg-red-50 px-2 py-0.5 rounded-md">
-                Gestión Financiera de Caja
+                Control Real de Caja
               </span>
-              <span className="text-xs text-gray-500 font-medium">Turno #{cashRegister.date}</span>
+              {hasOpenCashRegister && (
+                <span className="text-xs text-gray-500 font-medium">
+                  Turno #{activeCashRegister?.date}
+                </span>
+              )}
             </div>
             <h1 className="text-2xl font-black text-gray-900 mt-1">Caja General y Arqueos</h1>
             <p className="text-xs text-gray-500 mt-0.5">
-              Cierre automático diario a las 00:00 (Zona Horaria America/Costa_Rica).
+              Apertura y cierre explícito con conteo de denominaciones CRC • Sin fondos ficticios ni cierres silenciosos.
             </p>
           </div>
 
-          <div className="flex items-center gap-3">
-            <div className="flex items-center gap-2 bg-emerald-50 text-emerald-800 px-3.5 py-2 rounded-2xl border border-emerald-200 text-xs font-bold">
-              <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
-              <span>Caja Activa & Abierta</span>
+          <div className="flex flex-wrap items-center gap-2">
+            <div
+              className={`flex items-center gap-2 px-3.5 py-2 rounded-2xl border text-xs font-bold ${
+                hasOpenCashRegister
+                  ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                  : 'bg-red-50 text-red-800 border-red-200'
+              }`}
+            >
+              <span
+                className={`w-2.5 h-2.5 rounded-full ${
+                  hasOpenCashRegister ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'
+                }`}
+              />
+              <span>{hasOpenCashRegister ? 'Turno Abierto' : 'Caja Cerrada'}</span>
             </div>
 
-            {isAdmin && (
-              <button
-                onClick={() => setIsOpeningShift(true)}
-                className="px-4 py-2.5 bg-gray-900 hover:bg-black text-white rounded-2xl font-bold text-xs shadow-md transition"
-              >
-                Nuevo Turno
-              </button>
+            {hasOpenCashRegister && isAdmin && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setDrawerAction('deposit')}
+                  className="px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  <ArrowUpCircle className="w-4 h-4" />
+                  Ingreso
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDrawerAction('withdrawal')}
+                  className="px-3 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  <ArrowDownCircle className="w-4 h-4" />
+                  Retiro
+                </button>
+              </>
             )}
           </div>
         </div>
 
-        {/* Financial KPI Cards */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          {/* Expected Cash in Drawer */}
-          <div className="bg-white rounded-3xl p-5 border border-gray-200 shadow-xs">
-            <div className="flex items-center justify-between text-gray-500 mb-2">
-              <span className="text-xs font-bold uppercase tracking-wider">Efectivo Esperado</span>
-              <Coins className="w-5 h-5 text-amber-500" />
-            </div>
-            <div className="text-2xl font-black text-gray-950">
-              {formatCRC(cashRegister.expectedCash)}
-            </div>
-            <div className="text-[11px] text-gray-500 mt-1 flex items-center justify-between">
-              <span>Fondo Inicial:</span>
-              <span className="font-semibold text-gray-700">{formatCRC(cashRegister.initialCash)}</span>
-            </div>
-          </div>
-
-          {/* Sales Breakdown: Cash */}
-          <div className="bg-white rounded-3xl p-5 border border-gray-200 shadow-xs">
-            <div className="flex items-center justify-between text-gray-500 mb-2">
-              <span className="text-xs font-bold uppercase tracking-wider">Ventas en Efectivo</span>
-              <Banknote className="w-5 h-5 text-emerald-600" />
-            </div>
-            <div className="text-2xl font-black text-emerald-600">
-              {formatCRC(cashRegister.cashSales)}
-            </div>
-            <div className="text-[11px] text-gray-500 mt-1">
-              Ingresado directamente al cajón
-            </div>
-          </div>
-
-          {/* Sales Breakdown: SINPE */}
-          <div className="bg-white rounded-3xl p-5 border border-gray-200 shadow-xs">
-            <div className="flex items-center justify-between text-gray-500 mb-2">
-              <span className="text-xs font-bold uppercase tracking-wider">SINPE Móvil</span>
-              <Smartphone className="w-5 h-5 text-blue-600" />
-            </div>
-            <div className="text-2xl font-black text-blue-600">
-              {formatCRC(cashRegister.sinpeSales)}
-            </div>
-            <div className="text-[11px] text-gray-500 mt-1">
-              Verificado manualmente en teléfono
-            </div>
-          </div>
-
-          {/* Sales Breakdown: Tarjeta */}
-          <div className="bg-white rounded-3xl p-5 border border-gray-200 shadow-xs">
-            <div className="flex items-center justify-between text-gray-500 mb-2">
-              <span className="text-xs font-bold uppercase tracking-wider">Tarjeta / Datáfono</span>
-              <CreditCard className="w-5 h-5 text-purple-600" />
-            </div>
-            <div className="text-2xl font-black text-purple-600">
-              {formatCRC(cashRegister.cardSales)}
-            </div>
-            <div className="text-[11px] text-gray-500 mt-1">
-              Comprobantes de terminal POS
-            </div>
-          </div>
-        </div>
-
-        {/* Row 2: Automatic Midnight Rollover Card & Cash Deductions */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Midnight Close Automation Banner */}
-          <div className="lg:col-span-2 bg-gradient-to-r from-red-600 to-red-800 text-white rounded-3xl p-6 shadow-md flex flex-col justify-between">
-            <div>
-              <div className="flex items-center gap-2 text-xs font-black uppercase tracking-wider bg-red-900/60 w-fit px-3 py-1 rounded-full border border-red-500/40">
-                <Clock className="w-3.5 h-3.5" />
-                <span>Cierre Backend a las 00:00 (America/Costa_Rica)</span>
+        {/* Stale Open Register Warning */}
+        {staleOpenRegisters.length > 0 && (
+          <div className="p-4 rounded-2xl bg-amber-50 border-2 border-amber-300 text-amber-950 text-xs flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-start gap-2.5">
+              <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+              <div>
+                <div className="font-black text-sm">
+                  Alerta: Existe un turno abierto de una fecha anterior ({staleOpenRegisters[0].date})
+                </div>
+                <p className="mt-0.5">
+                  El sistema no cierra turnos en silencio para proteger su arqueo. Verifique el efectivo físico y cierre ese turno antes de iniciar la jornada de hoy.
+                </p>
               </div>
-              <h2 className="text-xl font-black mt-3">
-                Automatización de Medianoche Independiente
-              </h2>
-              <p className="text-xs text-red-100 mt-1 max-w-xl leading-relaxed">
-                El corte y cierre del período operativo se realiza automáticamente en backend a la medianoche sin depender de que la app permanezca abierta. Las órdenes que queden abiertas se mantienen vinculadas a su fecha original para evitar duplicidades contables.
+            </div>
+          </div>
+        )}
+
+        {feedback && (
+          <div
+            className={`p-3.5 rounded-2xl border text-xs font-bold flex items-center gap-2 ${
+              feedback.type === 'ok'
+                ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                : 'bg-red-50 border-red-200 text-red-800'
+            }`}
+          >
+            <CheckCircle2 className="w-4 h-4 shrink-0" />
+            <span>{feedback.text}</span>
+          </div>
+        )}
+
+        {/* EXPLICIT OPEN SHIFT SCREEN WHEN CLOSED */}
+        {!hasOpenCashRegister ? (
+          <div className="bg-white rounded-3xl p-6 md:p-8 border border-gray-200 shadow-xs max-w-lg mx-auto space-y-5">
+            <div className="text-center space-y-2">
+              <div className="w-14 h-14 rounded-2xl bg-red-100 text-red-600 flex items-center justify-center mx-auto">
+                <DoorOpen className="w-7 h-7" />
+              </div>
+              <h2 className="text-xl font-black text-gray-900">Abrir Turno de Caja</h2>
+              <p className="text-xs text-gray-500">
+                Para comenzar a cobrar pedidos en Punto de Venta, ingrese el efectivo inicial real con el que abre el cajón hoy.
               </p>
             </div>
 
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mt-5 pt-4 border-t border-red-500/40 text-xs">
+            <form onSubmit={handleOpenShift} className="space-y-4">
               <div>
-                <span className="text-red-200 text-[11px]">Ventas Totales Hoy:</span>
-                <div className="font-black text-base">{formatCRC(totalSales)}</div>
+                <label className="block text-xs font-bold text-gray-700 mb-1">
+                  Fondo Inicial en Efectivo (₡ CRC)
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  required
+                  value={openFloat}
+                  onChange={e => setOpenFloat(Number(e.target.value))}
+                  className="w-full px-4 py-3 text-xl font-black rounded-xl border border-gray-300 focus:ring-2 focus:ring-red-500"
+                />
               </div>
-              <div>
-                <span className="text-red-200 text-[11px]">Salidas Compras Efectivo:</span>
-                <div className="font-black text-base text-amber-200">
-                  -{formatCRC(cashRegister.cashPurchases)}
+              <button
+                type="submit"
+                className="w-full py-3.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-black text-sm shadow-md cursor-pointer"
+              >
+                Abrir Turno de Caja Ahora
+              </button>
+            </form>
+          </div>
+        ) : (
+          <>
+            {/* Financial KPI Cards */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              <div className="bg-white rounded-3xl p-5 border border-gray-200 shadow-xs">
+                <div className="flex items-center justify-between text-gray-500 mb-2">
+                  <span className="text-xs font-bold uppercase tracking-wider">Efectivo Esperado</span>
+                  <Coins className="w-5 h-5 text-amber-500" />
+                </div>
+                <div className="text-2xl font-black text-gray-950">{formatCRC(expectedCash)}</div>
+                <div className="text-[11px] text-gray-500 mt-1 flex justify-between">
+                  <span>Fondo Inicial:</span>
+                  <span className="font-semibold text-gray-700">
+                    {formatCRC(cashRegister.initialCash)}
+                  </span>
                 </div>
               </div>
-              <div>
-                <span className="text-red-200 text-[11px]">Salidas Gastos Efectivo:</span>
-                <div className="font-black text-base text-amber-200">
-                  -{formatCRC(cashRegister.cashExpenses)}
+
+              <div className="bg-white rounded-3xl p-5 border border-gray-200 shadow-xs">
+                <div className="flex items-center justify-between text-gray-500 mb-2">
+                  <span className="text-xs font-bold uppercase tracking-wider">Ventas Efectivo</span>
+                  <Banknote className="w-5 h-5 text-emerald-600" />
                 </div>
+                <div className="text-2xl font-black text-emerald-600">
+                  {formatCRC(cashRegister.cashSales || 0)}
+                </div>
+                <div className="text-[11px] text-gray-500 mt-1">
+                  Total ventas turno: {formatCRC(totalSales)}
+                </div>
+              </div>
+
+              <div className="bg-white rounded-3xl p-5 border border-gray-200 shadow-xs">
+                <div className="flex items-center justify-between text-gray-500 mb-2">
+                  <span className="text-xs font-bold uppercase tracking-wider">SINPE Móvil</span>
+                  <Smartphone className="w-5 h-5 text-blue-600" />
+                </div>
+                <div className="text-2xl font-black text-blue-600">
+                  {formatCRC(cashRegister.sinpeSales || 0)}
+                </div>
+                <div className="text-[11px] text-gray-500 mt-1">Verificado en teléfono de caja</div>
+              </div>
+
+              <div className="bg-white rounded-3xl p-5 border border-gray-200 shadow-xs">
+                <div className="flex items-center justify-between text-gray-500 mb-2">
+                  <span className="text-xs font-bold uppercase tracking-wider">Tarjeta / Datáfono</span>
+                  <CreditCard className="w-5 h-5 text-purple-600" />
+                </div>
+                <div className="text-2xl font-black text-purple-600">
+                  {formatCRC(cashRegister.cardSales || 0)}
+                </div>
+                <div className="text-[11px] text-gray-500 mt-1">Terminal física POS</div>
               </div>
             </div>
-          </div>
 
-          {/* Physical Cash Count (Arqueo de Caja) */}
-          <div className="bg-white rounded-3xl p-5 border border-gray-200 shadow-xs flex flex-col justify-between">
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <h3 className="font-black text-base text-gray-900">Arqueo Físico de Efectivo</h3>
-                <Calculator className="w-5 h-5 text-gray-400" />
+            {/* Formula Breakdown + Formal Close Form */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <div className="bg-white rounded-3xl p-5 border border-gray-200 shadow-xs space-y-3 text-xs">
+                <h3 className="font-black text-base text-gray-900">
+                  Fórmula Exacta de Efectivo Esperado
+                </h3>
+                <div className="space-y-2 pt-2">
+                  <div className="flex justify-between">
+                    <span>Fondo Inicial:</span>
+                    <span className="font-bold">{formatCRC(cashRegister.initialCash || 0)}</span>
+                  </div>
+                  <div className="flex justify-between text-emerald-700">
+                    <span>(+) Ventas en Efectivo:</span>
+                    <span className="font-bold">+{formatCRC(cashRegister.cashSales || 0)}</span>
+                  </div>
+                  <div className="flex justify-between text-emerald-700">
+                    <span>(+) Ingresos Manuales:</span>
+                    <span className="font-bold">+{formatCRC(cashRegister.cashDeposits || 0)}</span>
+                  </div>
+                  <div className="flex justify-between text-red-700">
+                    <span>(-) Retiros Manuales:</span>
+                    <span className="font-bold">-{formatCRC(cashRegister.cashWithdrawals || 0)}</span>
+                  </div>
+                  <div className="flex justify-between text-red-700">
+                    <span>(-) Compras en Efectivo:</span>
+                    <span className="font-bold">-{formatCRC(cashRegister.cashPurchases || 0)}</span>
+                  </div>
+                  <div className="flex justify-between text-red-700">
+                    <span>(-) Gastos en Efectivo:</span>
+                    <span className="font-bold">-{formatCRC(cashRegister.cashExpenses || 0)}</span>
+                  </div>
+                  <div className="flex justify-between text-red-700">
+                    <span>(-) Reembolsos Efectivo:</span>
+                    <span className="font-bold">-{formatCRC(cashRegister.cashRefunds || 0)}</span>
+                  </div>
+                  <div className="flex justify-between text-base font-black text-gray-950 pt-3 border-t border-gray-200">
+                    <span>(=) Efectivo Esperado:</span>
+                    <span>{formatCRC(expectedCash)}</span>
+                  </div>
+                </div>
               </div>
-              <p className="text-xs text-gray-500 mb-3">
-                Cuente billetes y monedas en el cajón y registre la cifra real.
-              </p>
 
-              {isAdmin ? (
-                <form onSubmit={handleSavePhysicalCount} className="space-y-3">
-                  <div>
-                    <label className="block text-xs font-bold text-gray-700 mb-1">
-                      Monto Físico Contado (CRC)
-                    </label>
+              {/* Formal Shift Close & Arqueo */}
+              <div className="bg-white rounded-3xl p-5 border border-gray-200 shadow-xs space-y-3">
+                <div className="flex items-center justify-between">
+                  <h3 className="font-black text-base text-gray-900 flex items-center gap-2">
+                    <Calculator className="w-5 h-5 text-red-600" />
+                    <span>Cierre Formal y Arqueo de Turno</span>
+                  </h3>
+                  <label className="flex items-center gap-1.5 text-xs font-bold text-gray-700 cursor-pointer">
                     <input
-                      type="number"
-                      required
-                      value={physicalCountInput}
-                      onChange={e => setPhysicalCountInput(Number(e.target.value))}
-                      className="w-full px-3.5 py-2 text-lg font-black text-gray-900 rounded-xl border border-gray-300 focus:ring-2 focus:ring-red-500 focus:outline-none"
+                      type="checkbox"
+                      checked={useDenominations}
+                      onChange={e => setUseDenominations(e.target.checked)}
                     />
-                  </div>
+                    <span>Contar billetes/monedas</span>
+                  </label>
+                </div>
 
-                  {cashRegister.difference !== undefined && (
-                    <div
-                      className={`p-3 rounded-xl border text-xs font-bold flex items-center justify-between ${
-                        cashRegister.difference === 0
-                          ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                          : cashRegister.difference > 0
-                          ? 'bg-blue-50 text-blue-800 border-blue-200'
-                          : 'bg-red-50 text-red-800 border-red-200'
-                      }`}
-                    >
-                      <span>
-                        {cashRegister.difference === 0
-                          ? 'Caja cuadrada exactamente'
-                          : cashRegister.difference > 0
-                          ? 'Sobrante en caja:'
-                          : 'Faltante en caja:'}
-                      </span>
-                      <span className="text-sm font-black">
-                        {formatCRC(Math.abs(cashRegister.difference))}
-                      </span>
+                <form onSubmit={handleCloseShift} className="space-y-3">
+                  {useDenominations ? (
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-48 overflow-y-auto p-2 bg-gray-50 rounded-2xl border border-gray-200 text-xs">
+                      {CR_DENOMINATIONS.map(denom => (
+                        <div key={denom} className="flex items-center justify-between gap-1 bg-white p-1.5 rounded-lg border border-gray-200">
+                          <span className="font-bold text-gray-700">{formatCRC(denom)}</span>
+                          <input
+                            type="number"
+                            min={0}
+                            value={closingCounts[denom] || ''}
+                            onChange={e =>
+                              setClosingCounts(prev => ({
+                                ...prev,
+                                [denom]: Math.max(0, Math.floor(Number(e.target.value) || 0)),
+                              }))
+                            }
+                            placeholder="0"
+                            className="w-12 px-1.5 py-0.5 text-right rounded border border-gray-300 font-bold"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div>
+                      <label className="block text-xs font-bold text-gray-700 mb-1">
+                        Efectivo Físico Contado (₡ CRC)
+                      </label>
+                      <input
+                        type="number"
+                        min={0}
+                        required
+                        value={manualCountInput}
+                        onChange={e => setManualCountInput(Number(e.target.value))}
+                        className="w-full px-3.5 py-2.5 text-lg font-black rounded-xl border border-gray-300"
+                      />
                     </div>
                   )}
 
-                  <div>
-                    <label className="block text-xs font-bold text-gray-700 mb-1">
-                      Observación / Justificación:
-                    </label>
-                    <input
-                      type="text"
-                      value={countNotes}
-                      onChange={e => setCountNotes(e.target.value)}
-                      placeholder="Ejemplo: Arqueo de medio turno sin novedades"
-                      className="w-full px-3 py-1.5 rounded-xl border border-gray-300 text-xs focus:ring-1 focus:ring-red-500 focus:outline-none"
-                    />
+                  <div
+                    className={`p-3 rounded-xl border text-xs font-bold flex items-center justify-between ${
+                      countedCash - expectedCash === 0
+                        ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                        : countedCash - expectedCash > 0
+                          ? 'bg-blue-50 border-blue-200 text-blue-800'
+                          : 'bg-red-50 border-red-200 text-red-800'
+                    }`}
+                  >
+                    <span>
+                      Contado: {formatCRC(countedCash)} •{' '}
+                      {countedCash - expectedCash === 0
+                        ? 'Caja Cuadrada'
+                        : countedCash - expectedCash > 0
+                          ? 'Sobrante:'
+                          : 'Faltante:'}
+                    </span>
+                    <span className="text-sm font-black">
+                      {formatCRC(Math.abs(countedCash - expectedCash))}
+                    </span>
                   </div>
 
-                  {countSavedMessage && (
-                    <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-bold text-center">
-                      {countSavedMessage}
-                    </div>
-                  )}
+                  <input
+                    type="text"
+                    value={closeNotes}
+                    onChange={e => setCloseNotes(e.target.value)}
+                    placeholder="Observaciones del cierre (obligatorio si hay diferencia)"
+                    className="w-full px-3 py-2 rounded-xl border border-gray-300 text-xs"
+                  />
 
                   <button
                     type="submit"
-                    className="w-full py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-xl font-bold text-xs shadow-md transition"
+                    className="w-full py-3 rounded-xl bg-red-600 hover:bg-red-700 text-white font-black text-xs shadow-md cursor-pointer"
                   >
-                    Guardar Arqueo Físico
+                    Cerrar Turno de Caja Definitivamente
                   </button>
                 </form>
-              ) : (
-                <div className="p-4 bg-gray-50 rounded-2xl border border-gray-200 text-xs text-gray-600 flex items-center gap-2">
-                  <Lock className="w-4 h-4 text-gray-400 shrink-0" />
-                  <span>El arqueo físico está restringido exclusivamente a administradores.</span>
-                </div>
-              )}
+              </div>
             </div>
-          </div>
-        </div>
+          </>
+        )}
 
         {/* Movements History */}
         <div className="bg-white rounded-3xl p-5 border border-gray-200 shadow-xs space-y-4">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div>
-              <h3 className="font-black text-lg text-gray-900">Historial de Movimientos de Caja</h3>
-              <p className="text-xs text-gray-500">
-                Trazabilidad de cada venta, compra o gasto que impacta el efectivo y métodos de pago.
-              </p>
-            </div>
-
-            {/* Filter pills */}
-            <div className="flex items-center gap-1.5 text-xs">
-              {['all', 'sale', 'purchase', 'expense'].map(type => (
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h3 className="font-black text-base text-gray-900">Movimientos del Turno</h3>
+            <div className="flex flex-wrap gap-1.5 text-xs">
+              {['all', 'sale', 'purchase', 'expense', 'deposit', 'withdrawal', 'refund'].map(t => (
                 <button
-                  key={type}
-                  onClick={() => setFilterType(type)}
-                  className={`px-3 py-1.5 rounded-xl font-bold transition capitalize ${
-                    filterType === type
-                      ? 'bg-red-600 text-white shadow-xs'
-                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                  key={t}
+                  onClick={() => setFilterType(t)}
+                  className={`px-2.5 py-1 rounded-lg font-bold capitalize cursor-pointer ${
+                    filterType === t ? 'bg-red-600 text-white' : 'bg-gray-100 text-gray-700'
                   }`}
                 >
-                  {type === 'all'
-                    ? 'Todos'
-                    : type === 'sale'
-                    ? 'Ventas'
-                    : type === 'purchase'
-                    ? 'Compras'
-                    : 'Gastos'}
+                  {t === 'all' ? 'Todos' : t}
                 </button>
               ))}
             </div>
@@ -303,53 +485,46 @@ export const CashRegisterView: React.FC = () => {
 
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs">
-              <thead className="bg-gray-50 border-b border-gray-200 text-gray-500 uppercase tracking-wider text-[10px]">
+              <thead className="bg-gray-50 border-b border-gray-200 text-gray-500 uppercase text-[10px]">
                 <tr>
-                  <th className="py-2.5 px-3">Fecha y Hora</th>
-                  <th className="py-2.5 px-3">Tipo</th>
-                  <th className="py-2.5 px-3">Descripción</th>
-                  <th className="py-2.5 px-3">Método</th>
-                  <th className="py-2.5 px-3">Usuario</th>
-                  <th className="py-2.5 px-3 text-right">Monto</th>
+                  <th className="py-2 px-3">Fecha</th>
+                  <th className="py-2 px-3">Tipo</th>
+                  <th className="py-2 px-3">Descripción</th>
+                  <th className="py-2 px-3">Método</th>
+                  <th className="py-2 px-3">Usuario</th>
+                  <th className="py-2 px-3 text-right">Monto</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
                 {filteredMovements.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="py-8 text-center text-gray-400">
-                      No hay movimientos registrados en este período.
+                    <td colSpan={6} className="py-6 text-center text-gray-400">
+                      Sin movimientos registrados.
                     </td>
                   </tr>
                 ) : (
                   filteredMovements.map(mov => {
-                    const isIncome = mov.type === 'sale' || mov.type === 'initial_float';
+                    const isIn =
+                      mov.type === 'sale' ||
+                      mov.type === 'initial_float' ||
+                      mov.type === 'deposit';
                     return (
                       <tr key={mov.id} className="hover:bg-gray-50">
-                        <td className="py-2.5 px-3 text-gray-600 whitespace-nowrap">
+                        <td className="py-2 px-3 whitespace-nowrap text-gray-600">
                           {formatDateTime(mov.createdAt)}
                         </td>
-                        <td className="py-2.5 px-3">
-                          <span
-                            className={`px-2 py-0.5 rounded-md font-bold text-[10px] uppercase ${
-                              isIncome
-                                ? 'bg-emerald-100 text-emerald-800'
-                                : 'bg-red-100 text-red-800'
-                            }`}
-                          >
-                            {mov.type === 'sale' ? 'Venta' : mov.type === 'purchase' ? 'Compra' : 'Gasto'}
-                          </span>
-                        </td>
-                        <td className="py-2.5 px-3 font-semibold text-gray-900">{mov.description}</td>
-                        <td className="py-2.5 px-3 uppercase text-gray-600 font-bold text-[10px]">
+                        <td className="py-2 px-3 uppercase font-bold text-[10px]">{mov.type}</td>
+                        <td className="py-2 px-3 font-semibold text-gray-900">{mov.description}</td>
+                        <td className="py-2 px-3 uppercase text-[10px] font-bold">
                           {mov.paymentMethod}
                         </td>
-                        <td className="py-2.5 px-3 text-gray-500">{mov.performedBy}</td>
+                        <td className="py-2 px-3 text-gray-500">{mov.performedBy}</td>
                         <td
-                          className={`py-2.5 px-3 text-right font-black text-sm ${
-                            isIncome ? 'text-emerald-600' : 'text-red-600'
+                          className={`py-2 px-3 text-right font-black ${
+                            isIn ? 'text-emerald-600' : 'text-red-600'
                           }`}
                         >
-                          {isIncome ? '+' : '-'}
+                          {isIn ? '+' : '-'}
                           {formatCRC(mov.amount)}
                         </td>
                       </tr>
@@ -360,46 +535,160 @@ export const CashRegisterView: React.FC = () => {
             </table>
           </div>
         </div>
+
+        {/* Closed Shifts History & Thermal Print / Audited Reopen */}
+        <div className="bg-white rounded-3xl p-5 border border-gray-200 shadow-xs space-y-3">
+          <h3 className="font-black text-base text-gray-900">Historial de Turnos de Caja</h3>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-gray-50 border-b border-gray-200 text-gray-500 uppercase text-[10px]">
+                <tr>
+                  <th className="py-2 px-3">Fecha</th>
+                  <th className="py-2 px-3">Estado</th>
+                  <th className="py-2 px-3">Esperado</th>
+                  <th className="py-2 px-3">Contado</th>
+                  <th className="py-2 px-3">Diferencia</th>
+                  <th className="py-2 px-3 text-right">Acciones</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {cashRegistersHistory.map(reg => (
+                  <tr key={reg.id} className="hover:bg-gray-50">
+                    <td className="py-2 px-3 font-bold">{reg.date}</td>
+                    <td className="py-2 px-3">
+                      <span
+                        className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                          reg.status === 'open'
+                            ? 'bg-emerald-100 text-emerald-800'
+                            : 'bg-gray-200 text-gray-700'
+                        }`}
+                      >
+                        {reg.status === 'open' ? 'Abierto' : 'Cerrado'}
+                      </span>
+                    </td>
+                    <td className="py-2 px-3">{formatCRC(reg.expectedCash || 0)}</td>
+                    <td className="py-2 px-3">
+                      {reg.actualCash !== undefined ? formatCRC(reg.actualCash) : '-'}
+                    </td>
+                    <td className="py-2 px-3 font-bold">
+                      {reg.difference !== undefined ? formatCRC(reg.difference) : '-'}
+                    </td>
+                    <td className="py-2 px-3 text-right space-x-2">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          printCashCloseReport(reg, restaurantConfig.printerWidth)
+                        }
+                        className="px-2.5 py-1 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-800 font-bold text-[11px] inline-flex items-center gap-1 cursor-pointer"
+                      >
+                        <Printer className="w-3 h-3" />
+                        Reporte
+                      </button>
+                      {isAdmin && reg.status === 'closed' && !hasOpenCashRegister && (
+                        <button
+                          type="button"
+                          onClick={() => setReopenTargetId(reg.id)}
+                          className="px-2.5 py-1 rounded-lg bg-amber-100 hover:bg-amber-200 text-amber-900 font-bold text-[11px] inline-flex items-center gap-1 cursor-pointer"
+                        >
+                          <RotateCcw className="w-3 h-3" />
+                          Reabrir
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
 
-      {/* Modal: Open New Shift */}
-      {isOpeningShift && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+      {/* Modal: Manual Deposit / Withdrawal */}
+      {drawerAction && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
           <form
-            onSubmit={handleOpenNewShift}
-            className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl space-y-4"
+            onSubmit={handleDrawerMovement}
+            className="bg-white rounded-3xl max-w-sm w-full p-6 space-y-4 shadow-2xl"
           >
-            <h3 className="font-black text-lg text-gray-900">Apertura de Nuevo Turno de Caja</h3>
-            <p className="text-xs text-gray-500">
-              Inicia un nuevo período operativo y establece el fondo de caja inicial.
-            </p>
-
+            <h3 className="font-black text-lg text-gray-900">
+              {drawerAction === 'deposit' ? 'Ingreso Manual de Efectivo' : 'Retiro de Efectivo de Caja'}
+            </h3>
             <div>
-              <label className="block text-xs font-bold text-gray-700 mb-1">
-                Fondo Inicial en Efectivo (CRC)
-              </label>
+              <label className="block text-xs font-bold text-gray-700 mb-1">Monto (₡ CRC)</label>
               <input
                 type="number"
+                min={1}
                 required
-                value={newShiftFloat}
-                onChange={e => setNewShiftFloat(Number(e.target.value))}
-                className="w-full px-3.5 py-2 rounded-xl border border-gray-300 text-sm font-bold text-gray-900 focus:ring-2 focus:ring-red-500 focus:outline-none"
+                value={drawerAmount}
+                onChange={e => setDrawerAmount(Number(e.target.value))}
+                className="w-full px-3 py-2 rounded-xl border border-gray-300 font-bold"
               />
             </div>
-
-            <div className="flex items-center gap-2 pt-2">
+            <div>
+              <label className="block text-xs font-bold text-gray-700 mb-1">Motivo / Respaldo</label>
+              <input
+                type="text"
+                required
+                value={drawerReason}
+                onChange={e => setDrawerReason(e.target.value)}
+                placeholder="Ej. Sencillo adicional / Depósito bancario"
+                className="w-full px-3 py-2 rounded-xl border border-gray-300 text-xs"
+              />
+            </div>
+            <div className="flex gap-2">
               <button
                 type="button"
-                onClick={() => setIsOpeningShift(false)}
-                className="flex-1 py-2.5 rounded-xl border border-gray-300 text-gray-700 font-bold text-xs"
+                onClick={() => setDrawerAction(null)}
+                className="flex-1 py-2.5 rounded-xl bg-gray-100 text-gray-700 font-bold text-xs cursor-pointer"
               >
                 Cancelar
               </button>
               <button
                 type="submit"
-                className="flex-1 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-xs shadow-md"
+                className="flex-1 py-2.5 rounded-xl bg-red-600 text-white font-bold text-xs cursor-pointer"
               >
-                Abrir Turno
+                Confirmar
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Modal: Audited Reopen */}
+      {reopenTargetId && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+          <form
+            onSubmit={handleReopen}
+            className="bg-white rounded-3xl max-w-sm w-full p-6 space-y-4 shadow-2xl"
+          >
+            <h3 className="font-black text-lg text-gray-900 flex items-center gap-2">
+              <Lock className="w-5 h-5 text-amber-600" />
+              Reabrir Turno Cerrado
+            </h3>
+            <p className="text-xs text-gray-500">
+              Esta acción queda registrada en la bitácora de auditoría inmutable.
+            </p>
+            <input
+              type="text"
+              required
+              value={reopenReason}
+              onChange={e => setReopenReason(e.target.value)}
+              placeholder="Justificación obligatoria *"
+              className="w-full px-3 py-2 rounded-xl border border-gray-300 text-xs"
+            />
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setReopenTargetId(null)}
+                className="flex-1 py-2.5 rounded-xl bg-gray-100 text-gray-700 font-bold text-xs cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="submit"
+                className="flex-1 py-2.5 rounded-xl bg-amber-600 text-white font-bold text-xs cursor-pointer"
+              >
+                Reabrir Turno
               </button>
             </div>
           </form>

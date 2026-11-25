@@ -1,0 +1,70 @@
+name: CI & DevSecOps — Pollos Karen Manager
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master, develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  secret-scan:
+    name: Secret Scanning (Gitleaks + Repo Guard)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Run custom repository secret scanner
+        run: node scripts/scan-secrets.mjs
+
+  build-test-audit:
+    name: TypeCheck, Tests, Audit & Bundle Verification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm install --no-audit
+
+      - name: TypeScript typecheck (lint)
+        run: npm run lint
+
+      - name: Run automated verification & security test suites
+        run: npm test
+
+      - name: Build production frontend bundle
+        run: npm run build
+
+      - name: Verify compiled bundle contains zero private secrets
+        run: node scripts/scan-secrets.mjs --dist
+
+      - name: Dependency vulnerability check (non-blocking summary)
+        continue-on-error: true
+        run: npm audit --audit-level=high || true

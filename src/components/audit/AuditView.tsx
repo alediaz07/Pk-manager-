@@ -3,6 +3,7 @@ import { usePOS } from '../../context/POSContext';
 import { useAuth } from '../../context/AuthContext';
 import { UserRole } from '../../types';
 import { formatDateTime } from '../../utils/formatters';
+import { BackupValidationResult } from '../../utils/backupManager';
 import {
   Lock,
   Download,
@@ -14,15 +15,30 @@ import {
   AlertCircle,
   X,
   ShieldCheck,
+  MailCheck,
+  Trash2,
 } from 'lucide-react';
 
 export const AuditView: React.FC = () => {
-  const { auditLogs, exportDataBackup, restoreDataBackup } = usePOS();
-  const { isAdmin, usersList, createStaffAccount, updateUserRole, toggleUserActive } = useAuth();
+  const { auditLogs, exportDataBackup, previewDataBackup, restoreDataBackup } = usePOS();
+  const {
+    isAdmin,
+    usersList,
+    userInvites,
+    createStaffAccount,
+    createUserInvite,
+    revokeUserInvite,
+    updateUserRole,
+    toggleUserActive,
+  } = useAuth();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [isRestoring, setIsRestoring] = useState(false);
-  const [pendingRestoreFile, setPendingRestoreFile] = useState<{ name: string; content: string } | null>(null);
+  const [pendingRestoreFile, setPendingRestoreFile] = useState<{
+    name: string;
+    content: string;
+    preview: BackupValidationResult;
+  } | null>(null);
   const [banner, setBanner] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   // Create Staff Account Modal State
@@ -33,6 +49,11 @@ export const AuditView: React.FC = () => {
   const [newRole, setNewRole] = useState<UserRole>('colaborador');
   const [isCreatingUser, setIsCreatingUser] = useState(false);
 
+  // Pre-authorized Google Invite State
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteName, setInviteName] = useState('');
+  const [inviteRole, setInviteRole] = useState<'colaborador' | 'cocina'>('colaborador');
+
   if (!isAdmin) {
     return (
       <div className="flex-1 flex items-center justify-center p-6 bg-gray-100">
@@ -42,7 +63,7 @@ export const AuditView: React.FC = () => {
           </div>
           <h2 className="text-xl font-black text-gray-900">Acceso Restringido</h2>
           <p className="text-xs text-gray-500 mt-2">
-            El registro de auditoría de seguridad, respaldos y administración de cuentas está reservado para Administradores.
+            El registro de auditoría, respaldos y administración de cuentas está reservado para Administradores.
           </p>
         </div>
       </div>
@@ -69,9 +90,9 @@ export const AuditView: React.FC = () => {
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
-      showBanner('success', 'Respaldo JSON generado y descargado correctamente.');
+      showBanner('success', 'Respaldo JSON sanitizado generado (sin secretos ni credenciales).');
     } catch (err: any) {
-      showBanner('error', `Error al generar el respaldo: ${err?.message || 'Error desconocido'}`);
+      showBanner('error', `Error al generar respaldo: ${err?.message || 'Error desconocido'}`);
     }
   };
 
@@ -80,7 +101,8 @@ export const AuditView: React.FC = () => {
     if (!file) return;
     try {
       const text = await file.text();
-      setPendingRestoreFile({ name: file.name, content: text });
+      const preview = previewDataBackup(text);
+      setPendingRestoreFile({ name: file.name, content: text, preview });
     } catch (err: any) {
       showBanner('error', `Error leyendo archivo: ${err?.message || 'Archivo inválido'}`);
     } finally {
@@ -89,14 +111,14 @@ export const AuditView: React.FC = () => {
   };
 
   const handleConfirmRestore = async () => {
-    if (!pendingRestoreFile) return;
+    if (!pendingRestoreFile || !pendingRestoreFile.preview.valid) return;
     setIsRestoring(true);
     try {
       const res = await restoreDataBackup(pendingRestoreFile.content);
       setPendingRestoreFile(null);
-      showBanner('success', res.message);
+      showBanner(res.success ? 'success' : 'error', res.message);
     } catch (err: any) {
-      showBanner('error', `Error al restaurar el respaldo: ${err?.message || 'Error en formato de datos'}`);
+      showBanner('error', err?.message || 'Error al restaurar respaldo.');
     } finally {
       setIsRestoring(false);
     }
@@ -115,9 +137,21 @@ export const AuditView: React.FC = () => {
       setIsCreateUserOpen(false);
       showBanner('success', `Cuenta creada exitosamente para ${newDisplayName} (${newRole.toUpperCase()}).`);
     } catch (err: any) {
-      showBanner('error', err?.message || 'Error al crear la cuenta de usuario.');
+      showBanner('error', err?.message || 'Error al crear la cuenta.');
     } finally {
       setIsCreatingUser(false);
+    }
+  };
+
+  const handleCreateInvite = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      await createUserInvite(inviteEmail, inviteName, inviteRole);
+      setInviteEmail('');
+      setInviteName('');
+      showBanner('success', `Correo preautorizado para iniciar con Google (${inviteRole.toUpperCase()}).`);
+    } catch (err: any) {
+      showBanner('error', err?.message || 'Error creando preautorización.');
     }
   };
 
@@ -133,27 +167,28 @@ export const AuditView: React.FC = () => {
   const handleToggleActive = async (uid: string, currentActive: boolean) => {
     try {
       await toggleUserActive(uid, currentActive);
-      showBanner('success', `Estado de cuenta actualizado correctamente.`);
+      showBanner('success', 'Estado de cuenta actualizado con revocación en tiempo real.');
     } catch (err: any) {
-      showBanner('error', err?.message || 'No se pudo actualizar el estado de la cuenta.');
+      showBanner('error', err?.message || 'No se pudo actualizar el estado.');
     }
   };
 
   return (
     <div className="flex-1 overflow-y-auto p-4 md:p-6 bg-gray-100 space-y-6">
       <div className="max-w-7xl mx-auto space-y-6">
-        {/* Header with Backup & Restore actions */}
+        {/* Header with Backup & Restore */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white p-5 rounded-3xl shadow-xs border border-gray-200">
           <div>
             <div className="flex items-center gap-2">
               <span className="text-xs font-bold text-red-600 uppercase tracking-wider bg-red-50 px-2 py-0.5 rounded-md">
-                Trazabilidad, Usuarios & Seguridad
+                Seguridad, Usuarios (3 Roles) &amp; Respaldos
               </span>
-              <span className="text-xs text-gray-500 font-medium">Registro Inmutable</span>
             </div>
-            <h1 className="text-2xl font-black text-gray-900 mt-1">Bitácora de Auditoría y Control de Acceso</h1>
+            <h1 className="text-2xl font-black text-gray-900 mt-1">
+              Bitácora de Auditoría y Control de Acceso
+            </h1>
             <p className="text-xs text-gray-500 mt-0.5">
-              Gestione cuentas de personal (Administradores y Colaboradores), respaldos y revise la bitácora inmutable.
+              Gestione cuentas de Administrador, Colaborador y Cocina (KDS), preautorice correos de Google y administre respaldos por lotes.
             </p>
           </div>
 
@@ -168,8 +203,7 @@ export const AuditView: React.FC = () => {
             <button
               onClick={() => fileInputRef.current?.click()}
               disabled={isRestoring}
-              className="inline-flex items-center gap-2 px-3.5 py-2.5 rounded-2xl bg-gray-100 hover:bg-gray-200 text-gray-800 text-xs font-bold transition disabled:opacity-50"
-              title="Restaurar base de datos desde un archivo JSON"
+              className="inline-flex items-center gap-2 px-3.5 py-2.5 rounded-2xl bg-gray-100 hover:bg-gray-200 text-gray-800 text-xs font-bold transition cursor-pointer disabled:opacity-50"
             >
               {isRestoring ? (
                 <Loader2 className="w-4 h-4 animate-spin text-gray-600" />
@@ -181,8 +215,7 @@ export const AuditView: React.FC = () => {
 
             <button
               onClick={handleDownloadBackup}
-              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold shadow-xs transition"
-              title="Descargar copia de seguridad completa del restaurante"
+              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold shadow-xs transition cursor-pointer"
             >
               <Download className="w-4 h-4" />
               <span>Descargar Respaldo JSON</span>
@@ -190,7 +223,6 @@ export const AuditView: React.FC = () => {
           </div>
         </div>
 
-        {/* Status Banner */}
         {banner && (
           <div
             className={`p-4 rounded-2xl border flex items-center justify-between text-xs font-bold ${
@@ -222,10 +254,10 @@ export const AuditView: React.FC = () => {
               </div>
               <div>
                 <h2 className="font-black text-base text-gray-900">
-                  Gestión de Cuentas y Roles (Administradores y Colaboradores)
+                  Cuentas de Personal Activas (Admin / Colaborador / Cocina)
                 </h2>
                 <p className="text-xs text-gray-500">
-                  Cree cuentas para el personal o asigne permisos de Administrador / Colaborador sin cerrar su sesión actual.
+                  Cualquier persona no registrada o suspendida es bloqueada inmediatamente al intentar ingresar.
                 </p>
               </div>
             </div>
@@ -233,103 +265,148 @@ export const AuditView: React.FC = () => {
             <button
               type="button"
               onClick={() => setIsCreateUserOpen(true)}
-              className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-2xl bg-gray-900 hover:bg-black text-white text-xs font-bold shadow-xs transition"
+              className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-2xl bg-gray-900 hover:bg-black text-white text-xs font-bold shadow-xs transition cursor-pointer"
             >
               <UserPlus className="w-4 h-4" />
-              <span>Registrar Cuenta de Personal</span>
+              <span>Crear Cuenta con Contraseña</span>
             </button>
           </div>
 
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs">
-              <thead className="bg-gray-50 border-b border-gray-200 text-gray-500 uppercase tracking-wider text-[10px]">
+              <thead className="bg-gray-50 border-b border-gray-200 text-gray-500 uppercase text-[10px]">
                 <tr>
                   <th className="py-2.5 px-3">Nombre</th>
-                  <th className="py-2.5 px-3">Correo Electrónico</th>
+                  <th className="py-2.5 px-3">Correo</th>
                   <th className="py-2.5 px-3">Rol Asignado</th>
                   <th className="py-2.5 px-3">Estado</th>
-                  <th className="py-2.5 px-3 text-right">Acciones de Rol y Acceso</th>
+                  <th className="py-2.5 px-3 text-right">Acciones</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {usersList.length === 0 ? (
-                  <tr>
-                    <td colSpan={5} className="py-6 text-center text-gray-400">
-                      No hay usuarios registrados en la colección.
-                    </td>
-                  </tr>
-                ) : (
-                  usersList.map(u => {
-                    const isPrimary = u.email?.toLowerCase() === 'alejandrodiazortiz07@gmail.com';
-                    return (
-                      <tr key={u.uid} className="hover:bg-gray-50">
-                        <td className="py-2.5 px-3 font-bold text-gray-900 flex items-center gap-1.5">
-                          <span>{u.displayName}</span>
-                          {isPrimary && (
-                            <span className="text-[10px] bg-amber-100 text-amber-900 px-2 py-0.5 rounded-full font-black">
-                              Principal
-                            </span>
-                          )}
-                        </td>
-                        <td className="py-2.5 px-3 text-gray-600">{u.email}</td>
-                        <td className="py-2.5 px-3">
-                          <span
-                            className={`px-2.5 py-0.5 rounded-full font-bold text-[10px] uppercase ${
-                              u.role === 'admin'
-                                ? 'bg-red-100 text-red-800'
-                                : 'bg-blue-100 text-blue-800'
-                            }`}
-                          >
-                            {u.role === 'admin' ? 'Administrador' : 'Colaborador'}
+                {usersList.map(u => {
+                  const isPrimary = u.email?.toLowerCase() === 'alejandrodiazortiz07@gmail.com';
+                  return (
+                    <tr key={u.uid} className="hover:bg-gray-50">
+                      <td className="py-2.5 px-3 font-bold text-gray-900">
+                        {u.displayName}{' '}
+                        {isPrimary && (
+                          <span className="text-[10px] bg-amber-100 text-amber-900 px-2 py-0.5 rounded-full font-black">
+                            Principal
                           </span>
-                        </td>
-                        <td className="py-2.5 px-3">
-                          <span
-                            className={`px-2 py-0.5 rounded-md font-bold text-[10px] ${
+                        )}
+                      </td>
+                      <td className="py-2.5 px-3 text-gray-600">{u.email}</td>
+                      <td className="py-2.5 px-3">
+                        {isPrimary ? (
+                          <span className="px-2.5 py-0.5 rounded-full font-bold text-[10px] uppercase bg-red-100 text-red-800">
+                            Administrador
+                          </span>
+                        ) : (
+                          <select
+                            value={u.role}
+                            onChange={e => handleRoleChange(u.uid, e.target.value as UserRole, u.email)}
+                            className="px-2 py-1 rounded-lg border border-gray-300 bg-white font-bold text-[11px]"
+                          >
+                            <option value="admin">Administrador</option>
+                            <option value="colaborador">Colaborador</option>
+                            <option value="cocina">Cocina (KDS)</option>
+                          </select>
+                        )}
+                      </td>
+                      <td className="py-2.5 px-3">
+                        <span
+                          className={`px-2 py-0.5 rounded-md font-bold text-[10px] ${
+                            u.active !== false
+                              ? 'bg-emerald-100 text-emerald-800'
+                              : 'bg-gray-200 text-gray-600'
+                          }`}
+                        >
+                          {u.active !== false ? 'Activo' : 'Suspendido'}
+                        </span>
+                      </td>
+                      <td className="py-2.5 px-3 text-right">
+                        {!isPrimary && (
+                          <button
+                            type="button"
+                            onClick={() => handleToggleActive(u.uid, u.active !== false)}
+                            className={`px-2.5 py-1 rounded-xl font-bold text-[11px] cursor-pointer ${
                               u.active !== false
-                                ? 'bg-emerald-100 text-emerald-800'
-                                : 'bg-gray-200 text-gray-600'
+                                ? 'bg-red-50 hover:bg-red-100 text-red-700'
+                                : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-700'
                             }`}
                           >
-                            {u.active !== false ? 'Activo' : 'Suspendido'}
-                          </span>
-                        </td>
-                        <td className="py-2.5 px-3 text-right space-x-2">
-                          {!isPrimary && (
-                            <>
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  handleRoleChange(
-                                    u.uid,
-                                    u.role === 'admin' ? 'colaborador' : 'admin',
-                                    u.email
-                                  )
-                                }
-                                className="px-2.5 py-1 rounded-xl bg-gray-100 hover:bg-gray-200 text-gray-800 font-bold text-[11px] transition"
-                              >
-                                {u.role === 'admin' ? 'Cambiar a Colaborador' : 'Promover a Admin'}
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => handleToggleActive(u.uid, u.active !== false)}
-                                className={`px-2.5 py-1 rounded-xl font-bold text-[11px] transition ${
-                                  u.active !== false
-                                    ? 'bg-red-50 hover:bg-red-100 text-red-700'
-                                    : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-700'
-                                }`}
-                              >
-                                {u.active !== false ? 'Suspender' : 'Reactivar'}
-                              </button>
-                            </>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })
-                )}
+                            {u.active !== false ? 'Suspender' : 'Reactivar'}
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
+          </div>
+
+          {/* Pre-authorized Google Invites */}
+          <div className="pt-4 border-t border-gray-100 space-y-3">
+            <h3 className="text-xs font-black text-gray-800 flex items-center gap-1.5">
+              <MailCheck className="w-4 h-4 text-red-600" />
+              <span>Preautorizar Acceso con Google (Sin autoregistro público)</span>
+            </h3>
+            <form onSubmit={handleCreateInvite} className="grid grid-cols-1 sm:grid-cols-4 gap-2 text-xs">
+              <input
+                type="text"
+                required
+                value={inviteName}
+                onChange={e => setInviteName(e.target.value)}
+                placeholder="Nombre del personal"
+                className="px-3 py-2 rounded-xl border border-gray-300"
+              />
+              <input
+                type="email"
+                required
+                value={inviteEmail}
+                onChange={e => setInviteEmail(e.target.value)}
+                placeholder="correo.google@gmail.com"
+                className="px-3 py-2 rounded-xl border border-gray-300"
+              />
+              <select
+                value={inviteRole}
+                onChange={e => setInviteRole(e.target.value as 'colaborador' | 'cocina')}
+                className="px-3 py-2 rounded-xl border border-gray-300 bg-white font-bold"
+              >
+                <option value="colaborador">Colaborador (Salón/Caja)</option>
+                <option value="cocina">Cocina (KDS)</option>
+              </select>
+              <button
+                type="submit"
+                className="py-2 px-3 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold cursor-pointer"
+              >
+                Autorizar Correo
+              </button>
+            </form>
+
+            {userInvites.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {userInvites.map(inv => (
+                  <div
+                    key={inv.id}
+                    className="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-gray-50 border border-gray-200 text-[11px]"
+                  >
+                    <span className="font-bold text-gray-800">{inv.email}</span>
+                    <span className="uppercase font-black text-red-600">{inv.role}</span>
+                    <button
+                      type="button"
+                      onClick={() => revokeUserInvite(inv.email)}
+                      className="text-gray-400 hover:text-red-600 cursor-pointer"
+                      title="Revocar invitación"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
 
@@ -341,12 +418,12 @@ export const AuditView: React.FC = () => {
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs">
-              <thead className="bg-gray-50 border-b border-gray-200 text-gray-500 uppercase tracking-wider text-[10px]">
+              <thead className="bg-gray-50 border-b border-gray-200 text-gray-500 uppercase text-[10px]">
                 <tr>
                   <th className="py-2.5 px-3">Fecha y Hora</th>
                   <th className="py-2.5 px-3">Acción</th>
                   <th className="py-2.5 px-3">Módulo</th>
-                  <th className="py-2.5 px-3">Motivo / Razón</th>
+                  <th className="py-2.5 px-3">Motivo</th>
                   <th className="py-2.5 px-3">Usuario</th>
                   <th className="py-2.5 px-3">Detalles</th>
                 </tr>
@@ -369,18 +446,9 @@ export const AuditView: React.FC = () => {
                           {log.action}
                         </span>
                       </td>
-                      <td className="py-2.5 px-3 font-semibold text-gray-700 capitalize">
-                        {log.collection}
-                      </td>
+                      <td className="py-2.5 px-3 font-semibold text-gray-700">{log.collection}</td>
                       <td className="py-2.5 px-3 font-bold text-gray-900">{log.reason}</td>
-                      <td className="py-2.5 px-3 text-gray-600">
-                        {log.performedBy}
-                        {log.performedByEmail && (
-                          <div className="text-[10px] text-gray-400 truncate max-w-[150px]">
-                            {log.performedByEmail}
-                          </div>
-                        )}
-                      </td>
+                      <td className="py-2.5 px-3 text-gray-600">{log.performedBy}</td>
                       <td className="py-2.5 px-3 text-gray-500 text-[11px]">{log.details || '-'}</td>
                     </tr>
                   ))
@@ -391,39 +459,63 @@ export const AuditView: React.FC = () => {
         </div>
       </div>
 
-      {/* Modal: Restore Backup Confirmation */}
+      {/* Modal: Validated Chunked Restore Confirmation */}
       {pendingRestoreFile && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-4">
-            <h3 className="font-black text-lg text-gray-900">Confirmar Restauración de Respaldo</h3>
-            <p className="text-xs text-gray-600 leading-relaxed">
-              ¿Está seguro de que desea restaurar los datos desde el archivo{' '}
-              <strong className="text-gray-900">"{pendingRestoreFile.name}"</strong>? Esta operación importará productos,
-              categorías, mesas, inventarios y recetas al sistema y dejará constancia en la bitácora de auditoría.
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-4 text-xs">
+            <h3 className="font-black text-lg text-gray-900">
+              Validación de Respaldo antes de Restaurar
+            </h3>
+            <p className="text-gray-600">
+              Archivo: <strong className="text-gray-900">{pendingRestoreFile.name}</strong>
             </p>
+
+            {pendingRestoreFile.preview.valid ? (
+              <div className="p-3 rounded-2xl bg-emerald-50 border border-emerald-200 space-y-1">
+                <div className="font-bold text-emerald-900">
+                  Respaldo válido: {pendingRestoreFile.preview.totalDocuments} documentos listos (lotes seguros ≤400).
+                </div>
+                <div className="text-[11px] text-emerald-800">
+                  {Object.entries(pendingRestoreFile.preview.collectionCounts)
+                    .map(([k, v]) => `${k}: ${v}`)
+                    .join(' • ')}
+                </div>
+              </div>
+            ) : (
+              <div className="p-3 rounded-2xl bg-red-50 border border-red-200 text-red-800 font-bold">
+                {pendingRestoreFile.preview.errors.join(' ')}
+              </div>
+            )}
+
+            {pendingRestoreFile.preview.warnings.length > 0 && (
+              <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-[11px]">
+                {pendingRestoreFile.preview.warnings.join(' ')}
+              </div>
+            )}
+
             <div className="flex items-center gap-2 pt-2">
               <button
                 type="button"
                 onClick={() => setPendingRestoreFile(null)}
                 disabled={isRestoring}
-                className="flex-1 py-2.5 rounded-xl border border-gray-300 text-gray-700 font-bold text-xs"
+                className="flex-1 py-2.5 rounded-xl border border-gray-300 text-gray-700 font-bold cursor-pointer"
               >
                 Cancelar
               </button>
               <button
                 type="button"
                 onClick={handleConfirmRestore}
-                disabled={isRestoring}
-                className="flex-1 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-xs shadow-md"
+                disabled={isRestoring || !pendingRestoreFile.preview.valid}
+                className="flex-1 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold shadow-md disabled:opacity-40 cursor-pointer"
               >
-                {isRestoring ? 'Restaurando...' : 'Confirmar Restauración'}
+                {isRestoring ? 'Restaurando...' : 'Restaurar Ahora'}
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Modal: Create Staff / Admin Account */}
+      {/* Modal: Create Staff Account (3 Roles) */}
       {isCreateUserOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
           <form
@@ -435,7 +527,7 @@ export const AuditView: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setIsCreateUserOpen(false)}
-                className="w-8 h-8 rounded-full bg-gray-100 hover:bg-gray-200 flex items-center justify-center text-gray-500"
+                className="w-8 h-8 rounded-full bg-gray-100 hover:bg-gray-200 flex items-center justify-center text-gray-500 cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -448,7 +540,7 @@ export const AuditView: React.FC = () => {
                 required
                 value={newDisplayName}
                 onChange={e => setNewDisplayName(e.target.value)}
-                placeholder="Ej. María Vargas (Salón)"
+                placeholder="Ej. Carlos Mora (Cocina)"
                 className="w-full px-3 py-2 rounded-xl border border-gray-300 font-semibold"
               />
             </div>
@@ -460,21 +552,21 @@ export const AuditView: React.FC = () => {
                 required
                 value={newEmail}
                 onChange={e => setNewEmail(e.target.value)}
-                placeholder="correo@polloskaren.cr"
+                placeholder="cocina@polloskaren.cr"
                 className="w-full px-3 py-2 rounded-xl border border-gray-300 font-semibold"
               />
             </div>
 
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="block font-bold text-gray-700 mb-1">Contraseña Inicial</label>
+                <label className="block font-bold text-gray-700 mb-1">Contraseña Segura</label>
                 <input
                   type="password"
                   required
-                  minLength={6}
+                  minLength={8}
                   value={newPassword}
                   onChange={e => setNewPassword(e.target.value)}
-                  placeholder="Mínimo 6 caracteres"
+                  placeholder="8+ chars (letras y números)"
                   className="w-full px-3 py-2 rounded-xl border border-gray-300 font-semibold"
                 />
               </div>
@@ -486,8 +578,9 @@ export const AuditView: React.FC = () => {
                   onChange={e => setNewRole(e.target.value as UserRole)}
                   className="w-full px-3 py-2 rounded-xl border border-gray-300 bg-white font-bold"
                 >
-                  <option value="colaborador">Colaborador (POS / Mesas / Caja)</option>
-                  <option value="admin">Administrador (Acceso Total)</option>
+                  <option value="colaborador">Colaborador (Salón/Caja)</option>
+                  <option value="cocina">Cocina (Solo KDS)</option>
+                  <option value="admin">Administrador (Total)</option>
                 </select>
               </div>
             </div>
@@ -496,16 +589,16 @@ export const AuditView: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setIsCreateUserOpen(false)}
-                className="flex-1 py-2.5 rounded-xl border border-gray-300 text-gray-700 font-bold"
+                className="flex-1 py-2.5 rounded-xl border border-gray-300 text-gray-700 font-bold cursor-pointer"
               >
                 Cancelar
               </button>
               <button
                 type="submit"
                 disabled={isCreatingUser}
-                className="flex-1 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold shadow-md"
+                className="flex-1 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold shadow-md cursor-pointer"
               >
-                {isCreatingUser ? 'Creando Cuenta...' : 'Crear Cuenta'}
+                {isCreatingUser ? 'Creando...' : 'Crear Cuenta'}
               </button>
             </div>
           </form>

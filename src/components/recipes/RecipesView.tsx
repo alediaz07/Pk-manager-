@@ -150,13 +150,14 @@ export const RecipesView: React.FC = () => {
     if (!editingRecipe) return;
 
     const validIngredients = editingRecipe.ingredients.filter(ing => ing.quantity > 0);
-    const totalCost = Math.round(
-      validIngredients.reduce((sum, ing) => sum + ing.quantity * (ing.unitCost || 0), 0)
-    );
+    const yieldPortions = Math.max(1, Number(editingRecipe.yieldPortions) || 1);
+    const batchCost = validIngredients.reduce((sum, ing) => sum + ing.quantity * (ing.unitCost || 0), 0);
+    const totalCost = Math.round(batchCost / yieldPortions);
     const isComplete = validIngredients.length > 0 && totalCost > 0;
 
     const finalRecipe: Recipe = {
       ...editingRecipe,
+      yieldPortions,
       ingredients: validIngredients,
       calculatedCost: totalCost,
       isComplete,
@@ -561,6 +562,33 @@ export const RecipesView: React.FC = () => {
                   className="w-full px-3 py-2 rounded-xl border border-gray-300 font-semibold"
                 />
               </div>
+
+              <div className="sm:col-span-2 grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-gray-700 mb-1">
+                    Rendimiento (Porciones por Lote)
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    step={1}
+                    required
+                    value={editingRecipe.yieldPortions || 1}
+                    onChange={e =>
+                      setEditingRecipe({
+                        ...editingRecipe,
+                        yieldPortions: Math.max(1, Number(e.target.value) || 1),
+                      })
+                    }
+                    className="w-full px-3 py-2 rounded-xl border border-gray-300 font-bold"
+                  />
+                </div>
+                <div className="flex items-end">
+                  <p className="text-[11px] text-gray-500 leading-tight">
+                    Si la receta es para 1 plato deje <strong>1</strong>. Si es para una olla de 20 porciones indique <strong>20</strong>; el descuento y costo por porción se dividirán automáticamente.
+                  </p>
+                </div>
+              </div>
             </div>
 
             {/* Ingredients List */}
@@ -639,14 +667,29 @@ export const RecipesView: React.FC = () => {
             </div>
 
             <div className="p-3 bg-gray-50 rounded-2xl border border-gray-200 flex items-center justify-between text-xs">
-              <span className="font-bold text-gray-700">Costo Total Estimado por Porción:</span>
+              <div>
+                <span className="font-bold text-gray-700 block">
+                  Costo Total Estimado por Porción (÷ {Math.max(1, editingRecipe.yieldPortions || 1)}):
+                </span>
+                <span className="text-[11px] text-gray-500">
+                  Lote total:{' '}
+                  {formatCRC(
+                    Math.round(
+                      editingRecipe.ingredients.reduce(
+                        (sum, ing) => sum + (Number(ing.quantity) || 0) * (Number(ing.unitCost) || 0),
+                        0
+                      )
+                    )
+                  )}
+                </span>
+              </div>
               <span className="text-base font-black text-red-600">
                 {formatCRC(
                   Math.round(
                     editingRecipe.ingredients.reduce(
                       (sum, ing) => sum + (Number(ing.quantity) || 0) * (Number(ing.unitCost) || 0),
                       0
-                    )
+                    ) / Math.max(1, Number(editingRecipe.yieldPortions) || 1)
                   )
                 )}
               </span>

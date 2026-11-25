@@ -2,15 +2,11 @@ import React, { useState, useMemo } from 'react';
 import { usePOS } from '../../context/POSContext';
 import { InventoryItem } from '../../types';
 import { formatCRC } from '../../utils/formatters';
+import { calculateIngredientConsumption } from '../../utils/orderStateMachine';
 import {
   CalendarDays,
   X,
-  TrendingUp,
-  PackageCheck,
-  AlertCircle,
-  ShoppingCart,
   Printer,
-  ChevronRight,
   Info,
 } from 'lucide-react';
 
@@ -18,6 +14,8 @@ interface WeeklyPurchasePlannerModalProps {
   isOpen: boolean;
   onClose: () => void;
 }
+
+type ForecastSource = 'historial_real' | 'recetas_ventas' | 'estimacion_inicial';
 
 interface ItemRecommendation {
   item: InventoryItem;
@@ -29,6 +27,7 @@ interface ItemRecommendation {
   unitCost: number;
   totalEstimatedCost: number;
   reason: string;
+  dataSource: ForecastSource;
   status: 'critical' | 'warning' | 'optimal';
 }
 
@@ -37,29 +36,34 @@ export const WeeklyPurchasePlannerModal: React.FC<WeeklyPurchasePlannerModalProp
   onClose,
 }) => {
   const { inventory, orders, recipes, inventoryMovements } = usePOS();
-  const [safetyBufferPercent, setSafetyBufferPercent] = useState<number>(20); // 20% technical safety margin
-  const [operationalDays, setOperationalDays] = useState<number>(5); // Mon-Fri = 5 days
+  const [safetyBufferPercent, setSafetyBufferPercent] = useState<number>(20);
+  const [operationalDays, setOperationalDays] = useState<number>(5);
 
-  // Compute recommendations based on real historical consumption and recipe projections
   const recommendations: ItemRecommendation[] = useMemo(() => {
-    // 1. Gather historical consumption from movements in the last 14 days
     const now = Date.now();
     const fourteenDaysAgo = now - 14 * 24 * 60 * 60 * 1000;
 
+    // 1. Real 14-day consumption + waste movements
     const historicalConsumptionByItem: Record<string, number> = {};
+    const movementDates = new Set<string>();
 
     inventoryMovements.forEach(mov => {
       const movTime = new Date(mov.createdAt).getTime();
       if (movTime >= fourteenDaysAgo && (mov.type === 'consumption' || mov.type === 'waste')) {
         const qty = Math.abs(mov.quantity || 0);
         historicalConsumptionByItem[mov.itemId] = (historicalConsumptionByItem[mov.itemId] || 0) + qty;
+        if (mov.createdAt) movementDates.add(mov.createdAt.slice(0, 10));
       }
     });
+    const observedMovementDays = Math.max(1, Math.min(10, movementDates.size || 10));
 
-    // 2. Also analyze recent orders and recipes to estimate run-rate if movements are new
+    // 2. Fallback: recipe-derived consumption from paid orders respecting yieldPortions + unit conversion
     const recipeRateByItem: Record<string, number> = {};
-    const paidOrders = orders.filter(o => o.paymentStatus === 'paid');
-    const orderCount = paidOrders.length;
+    const paidOrders = orders.filter(
+      o => (o.paymentStatus === 'paid' || o.financialStatus === 'paid') && o.status !== 'cancelled'
+    );
+    const orderDates = new Set(paidOrders.map(o => o.operationalDate || o.createdAt.slice(0, 10)));
+    const observedOrderDays = Math.max(1, orderDates.size);
 
     paidOrders.forEach(o => {
       o.items.forEach(lineItem => {
@@ -74,32 +78,38 @@ export const WeeklyPurchasePlannerModal: React.FC<WeeklyPurchasePlannerModalProp
         });
         if (matched && matched.ingredients) {
           matched.ingredients.forEach(ing => {
-            const consumed = ing.quantity * lineItem.quantity;
-            recipeRateByItem[ing.itemId] = (recipeRateByItem[ing.itemId] || 0) + consumed;
+            const invTarget = inventory.find(i => i.id === ing.itemId);
+            if (!invTarget) return;
+            const calc = calculateIngredientConsumption(
+              lineItem.quantity,
+              matched.yieldPortions || 1,
+              ing.quantity,
+              ing.unit,
+              invTarget.unit
+            );
+            if (calc.compatible && calc.deductedQty > 0) {
+              recipeRateByItem[ing.itemId] = (recipeRateByItem[ing.itemId] || 0) + calc.deductedQty;
+            }
           });
         }
       });
     });
 
     return inventory.map(item => {
-      // Historical 14-day total divided by 10 operational days = daily avg
       const histTotal = historicalConsumptionByItem[item.id] || 0;
-      let dailyAvg = histTotal > 0 ? histTotal / 10 : 0;
+      let dailyAvg = 0;
+      let dataSource: ForecastSource = 'estimacion_inicial';
 
-      // If no movements logged yet, fall back to orders/recipes rate
-      if (dailyAvg === 0 && recipeRateByItem[item.id]) {
-        dailyAvg = (recipeRateByItem[item.id] || 0) / Math.max(1, orderCount > 0 ? 5 : 1);
-      }
-
-      // If still zero (e.g. initial setup), establish baseline benchmark based on item category
-      if (dailyAvg === 0) {
-        if (item.id === 'inv-pollo') dailyAvg = 15; // 15 kg/day standard for Pollos Karen
-        else if (item.id === 'inv-arroz') dailyAvg = 6; // 6 kg/day
-        else if (item.id === 'inv-frijol') dailyAvg = 4; // 4 kg/day
-        else if (item.id === 'inv-aceite') dailyAvg = 2.5; // 2.5 L/day
-        else if (item.id === 'inv-platano') dailyAvg = 25; // 25 plátanos/day
-        else if (item.id === 'inv-papas') dailyAvg = 8; // 8 kg/day
-        else dailyAvg = Math.max(1, (item.minStock || 5) / 5);
+      if (histTotal > 0) {
+        dailyAvg = histTotal / observedMovementDays;
+        dataSource = 'historial_real';
+      } else if ((recipeRateByItem[item.id] || 0) > 0) {
+        dailyAvg = recipeRateByItem[item.id] / observedOrderDays;
+        dataSource = 'recetas_ventas';
+      } else {
+        // Explicit min-stock baseline when no consumption history exists yet
+        dailyAvg = Math.max(0, (item.minStock || 0) / Math.max(1, operationalDays));
+        dataSource = 'estimacion_inicial';
       }
 
       const weeklyProjectedConsumption = Math.round(dailyAvg * operationalDays * 100) / 100;
@@ -124,9 +134,16 @@ export const WeeklyPurchasePlannerModal: React.FC<WeeklyPurchasePlannerModalProp
       if (status === 'critical') {
         reason = `Stock actual (${currentStock} ${item.unit}) en nivel crítico, por debajo de la reserva de seguridad (${safetyStock} ${item.unit}).`;
       } else if (status === 'warning') {
-        reason = `Stock suficiente para ${Math.max(0, Math.round((currentStock / dailyAvg) * 10) / 10)} días de operación. Requiere reposición para cubrir la semana completa de 5 días.`;
+        const daysCovered = dailyAvg > 0 ? Math.max(0, Math.round((currentStock / dailyAvg) * 10) / 10) : 0;
+        reason =
+          dailyAvg > 0
+            ? `Stock suficiente para ~${daysCovered} días de operación. Requiere reposición para cubrir ${operationalDays} días.`
+            : `Stock por debajo del mínimo configurado (${safetyStock} ${item.unit}).`;
       } else {
-        reason = `Stock suficiente para la demanda semanal proyectada de ${weeklyProjectedConsumption} ${item.unit}.`;
+        reason =
+          weeklyProjectedConsumption > 0
+            ? `Stock suficiente para la demanda proyectada de ${weeklyProjectedConsumption} ${item.unit}.`
+            : `Sin consumo registrado aún; stock actual por encima del mínimo (${safetyStock} ${item.unit}).`;
       }
 
       return {
@@ -139,6 +156,7 @@ export const WeeklyPurchasePlannerModal: React.FC<WeeklyPurchasePlannerModalProp
         unitCost,
         totalEstimatedCost,
         reason,
+        dataSource,
         status,
       };
     });
@@ -252,9 +270,26 @@ export const WeeklyPurchasePlannerModal: React.FC<WeeklyPurchasePlannerModalProp
                     }`}
                   >
                     <td className="py-3 px-3">
-                      <div className="font-bold text-gray-900">{rec.item.name}</div>
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="font-bold text-gray-900">{rec.item.name}</span>
+                        <span
+                          className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded-md ${
+                            rec.dataSource === 'historial_real'
+                              ? 'bg-emerald-100 text-emerald-800'
+                              : rec.dataSource === 'recetas_ventas'
+                              ? 'bg-blue-100 text-blue-800'
+                              : 'bg-gray-100 text-gray-600'
+                          }`}
+                        >
+                          {rec.dataSource === 'historial_real'
+                            ? 'Historial real'
+                            : rec.dataSource === 'recetas_ventas'
+                            ? 'Recetas / ventas'
+                            : 'Estimación inicial'}
+                        </span>
+                      </div>
                       <div className="text-[11px] text-gray-500 flex items-center gap-1 mt-0.5">
-                        <Info className="w-3 h-3 text-gray-400" />
+                        <Info className="w-3 h-3 text-gray-400 shrink-0" />
                         <span>{rec.reason}</span>
                       </div>
                     </td>

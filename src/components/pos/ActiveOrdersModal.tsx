@@ -17,6 +17,13 @@ import {
   Search,
 } from 'lucide-react';
 
+import {
+  FINANCIAL_STATUS_LABELS,
+  OPERATIONAL_STATUS_LABELS,
+  resolveFinancialStatus,
+  resolveOperationalStatus,
+} from '../../utils/orderStateMachine';
+
 interface ActiveOrdersModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -25,7 +32,11 @@ interface ActiveOrdersModalProps {
   onPayOrder: (order: RestaurantOrder) => void;
   onPrintTicket: (order: RestaurantOrder) => void;
   onUpdateStatus: (orderId: string, status: OrderStatus) => void;
-  onCancelOrder: (orderId: string, reason: string) => void;
+  onCancelOrder: (
+    orderId: string,
+    reason: string,
+    disposition?: 'restored' | 'waste' | 'none'
+  ) => void;
 }
 
 export const ActiveOrdersModal: React.FC<ActiveOrdersModalProps> = ({
@@ -43,6 +54,7 @@ export const ActiveOrdersModal: React.FC<ActiveOrdersModalProps> = ({
   const [search, setSearch] = useState<string>('');
   const [cancellingOrderId, setCancellingOrderId] = useState<string | null>(null);
   const [cancelReason, setCancelReason] = useState<string>('');
+  const [cancelDisposition, setCancelDisposition] = useState<'restored' | 'waste' | 'none'>('restored');
 
   if (!isOpen) return null;
 
@@ -63,9 +75,10 @@ export const ActiveOrdersModal: React.FC<ActiveOrdersModalProps> = ({
   const handleConfirmCancel = (e: React.FormEvent) => {
     e.preventDefault();
     if (!cancellingOrderId || !cancelReason.trim()) return;
-    onCancelOrder(cancellingOrderId, cancelReason.trim());
+    onCancelOrder(cancellingOrderId, cancelReason.trim(), cancelDisposition);
     setCancellingOrderId(null);
     setCancelReason('');
+    setCancelDisposition('restored');
   };
 
   return (
@@ -168,21 +181,12 @@ export const ActiveOrdersModal: React.FC<ActiveOrdersModalProps> = ({
                         </span>
                       </span>
 
-                      {/* Status Badge with progression trigger */}
-                      <span
-                        className={`text-[10px] font-black uppercase px-2.5 py-0.5 rounded-full border ${
-                          ord.status === 'in_kitchen'
-                            ? 'bg-amber-100 text-amber-800 border-amber-300'
-                            : ord.status === 'served'
-                            ? 'bg-blue-100 text-blue-800 border-blue-300'
-                            : 'bg-gray-200 text-gray-700 border-gray-300'
-                        }`}
-                      >
-                        {ord.status === 'in_kitchen'
-                          ? 'En Cocina'
-                          : ord.status === 'served'
-                          ? 'Servido / Listo'
-                          : 'Pendiente'}
+                      {/* Separated Operational & Financial Badges */}
+                      <span className="text-[10px] font-black uppercase px-2.5 py-0.5 rounded-full border bg-amber-100 text-amber-800 border-amber-300">
+                        {OPERATIONAL_STATUS_LABELS[resolveOperationalStatus(ord)]}
+                      </span>
+                      <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-full border bg-gray-100 text-gray-700 border-gray-300">
+                        {FINANCIAL_STATUS_LABELS[resolveFinancialStatus(ord)]}
                       </span>
                     </div>
 
@@ -313,6 +317,21 @@ export const ActiveOrdersModal: React.FC<ActiveOrdersModalProps> = ({
                   placeholder="Ej: Cliente canceló pedido, error de digitación..."
                   className="w-full px-3 py-2 rounded-xl border border-gray-300 text-xs focus:ring-2 focus:ring-red-500 focus:outline-none"
                 />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-gray-700 mb-1">
+                  Disposición de insumos:
+                </label>
+                <select
+                  value={cancelDisposition}
+                  onChange={e => setCancelDisposition(e.target.value as 'restored' | 'waste' | 'none')}
+                  className="w-full px-3 py-2 rounded-xl border border-gray-300 bg-white text-xs font-semibold"
+                >
+                  <option value="restored">No se preparó — devolver insumos al stock</option>
+                  <option value="waste">Ya se preparó — registrar como merma</option>
+                  <option value="none">Sin movimiento de inventario</option>
+                </select>
               </div>
 
               <div className="flex items-center gap-2 pt-2">

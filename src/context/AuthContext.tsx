@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { initializeApp, getApps } from 'firebase/app';
 import {
   User,
@@ -7,6 +7,7 @@ import {
   signInWithPopup,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
+  sendPasswordResetEmail,
   signOut,
 } from 'firebase/auth';
 import { collection, doc, getDoc, setDoc, updateDoc, deleteDoc, onSnapshot } from 'firebase/firestore';
@@ -14,23 +15,60 @@ import firebaseConfig from '../../firebase-applet-config.json';
 import { auth, db, googleProvider, handleFirestoreError, OperationType } from '../config/firebase';
 import { AppUser, UserRole } from '../types';
 
+export interface UserInvite {
+  id: string; // normalized email
+  email: string;
+  displayName: string;
+  role: UserRole;
+  active: boolean;
+  invitedBy: string;
+  createdAt: string;
+  acceptedAt?: string;
+}
+
 interface AuthContextType {
   currentUser: User | null;
   appUser: AppUser | null;
   role: UserRole | null;
   isAdmin: boolean;
   isColaborador: boolean;
+  isCocina: boolean;
   loading: boolean;
+  authBlockedMessage: string | null;
+  clearAuthBlockedMessage: () => void;
   usersList: AppUser[];
+  userInvites: UserInvite[];
   loginWithGoogle: () => Promise<void>;
   loginWithEmail: (email: string, pass: string) => Promise<void>;
+  sendPasswordReset: (email: string) => Promise<void>;
   createStaffAccount: (email: string, pass: string, displayName: string, role: UserRole) => Promise<void>;
+  createUserInvite: (email: string, displayName: string, role: UserRole) => Promise<void>;
+  revokeUserInvite: (email: string) => Promise<void>;
   updateUserRole: (targetUid: string, newRole: UserRole, email: string) => Promise<void>;
   toggleUserActive: (targetUid: string, currentActive: boolean) => Promise<void>;
   logout: () => Promise<void>;
 }
 
-const PRIMARY_ADMIN_EMAIL = 'alejandrodiazortiz07@gmail.com';
+const PRIMARY_ADMIN_EMAIL =
+  (import.meta.env.VITE_PRIMARY_ADMIN_EMAIL as string | undefined) ||
+  'alejandrodiazortiz07@gmail.com';
+
+export function normalizeInviteId(email: string): string {
+  return email
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '_');
+}
+
+export function validateStrongPassword(password: string): string | null {
+  if (!password || password.length < 8) {
+    return 'La contraseña debe tener al menos 8 caracteres.';
+  }
+  if (!/[A-Za-z]/.test(password) || !/[0-9]/.test(password)) {
+    return 'La contraseña debe combinar letras y números.';
+  }
+  return null;
+}
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
@@ -39,105 +77,223 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [appUser, setAppUser] = useState<AppUser | null>(null);
   const [role, setRole] = useState<UserRole | null>(null);
   const [loading, setLoading] = useState(true);
+  const [authBlockedMessage, setAuthBlockedMessage] = useState<string | null>(null);
   const [usersList, setUsersList] = useState<AppUser[]>([]);
+  const [userInvites, setUserInvites] = useState<UserInvite[]>([]);
+
+  const clearAuthBlockedMessage = useCallback(() => {
+    setAuthBlockedMessage(null);
+  }, []);
 
   useEffect(() => {
+    let unsubOwnProfile: (() => void) | null = null;
+
     const unsubscribe = onAuthStateChanged(auth, async user => {
-      setCurrentUser(user);
+      if (unsubOwnProfile) {
+        unsubOwnProfile();
+        unsubOwnProfile = null;
+      }
 
-      if (user) {
-        try {
-          const isPrimaryAdmin =
-            Boolean(user.email && user.email.toLowerCase() === PRIMARY_ADMIN_EMAIL.toLowerCase());
-
-          // Check if admin doc exists in /admins/{uid}
-          const adminDocRef = doc(db, 'admins', user.uid);
-          let isAdminUser = isPrimaryAdmin;
-
-          try {
-            const adminSnap = await getDoc(adminDocRef);
-            if (adminSnap.exists()) {
-              isAdminUser = true;
-            } else if (isPrimaryAdmin) {
-              // Bootstrap primary admin doc into /admins/{uid}
-              await setDoc(adminDocRef, {
-                email: user.email,
-                addedAt: new Date().toISOString(),
-              });
-              isAdminUser = true;
-            }
-          } catch (e) {
-            console.warn('Verificación de admins en Firestore:', e);
-            if (isPrimaryAdmin) isAdminUser = true;
-          }
-
-          // Fetch or initialize user profile in /users/{uid}
-          const userDocRef = doc(db, 'users', user.uid);
-          let finalRole: UserRole = isAdminUser ? 'admin' : 'colaborador';
-          let displayName = user.displayName || (isAdminUser ? 'Administrador Karen' : 'Colaborador');
-          let isActive = true;
-
-          try {
-            const userSnap = await getDoc(userDocRef);
-            if (userSnap.exists()) {
-              const data = userSnap.data();
-              finalRole = isAdminUser ? 'admin' : ((data.role as UserRole) || finalRole);
-              displayName = data.displayName || displayName;
-              isActive = data.active !== false;
-            } else {
-              const newProfile: AppUser = {
-                uid: user.uid,
-                email: user.email || '',
-                displayName,
-                role: finalRole,
-                active: true,
-                createdAt: new Date().toISOString(),
-              };
-              await setDoc(userDocRef, newProfile);
-            }
-          } catch (e) {
-            console.warn('Verificación de perfil de usuario:', e);
-          }
-
-          if (!isActive && !isPrimaryAdmin) {
-            await signOut(auth);
-            setCurrentUser(null);
-            setAppUser(null);
-            setRole(null);
-            setLoading(false);
-            return;
-          }
-
-          const resolvedProfile: AppUser = {
-            uid: user.uid,
-            email: user.email || '',
-            displayName,
-            role: finalRole,
-            active: isActive,
-          };
-
-          setAppUser(resolvedProfile);
-          setRole(finalRole);
-        } catch (error) {
-          console.error('Error cargando perfil de usuario desde Firestore:', error);
-          setAppUser(null);
-          setRole(null);
-        }
-      } else {
+      if (!user) {
+        setCurrentUser(null);
         setAppUser(null);
         setRole(null);
         setUsersList([]);
+        setUserInvites([]);
+        setLoading(false);
+        return;
       }
-      setLoading(false);
+
+      setLoading(true);
+
+      try {
+        const userEmail = (user.email || '').trim().toLowerCase();
+        const isPrimaryAdmin =
+          Boolean(userEmail && userEmail === PRIMARY_ADMIN_EMAIL.trim().toLowerCase());
+
+        // 1. Check /admins/{uid}
+        const adminDocRef = doc(db, 'admins', user.uid);
+        let isAdminUser = isPrimaryAdmin;
+
+        try {
+          const adminSnap = await getDoc(adminDocRef);
+          if (adminSnap.exists()) {
+            isAdminUser = true;
+          } else if (isPrimaryAdmin) {
+            await setDoc(adminDocRef, {
+              email: user.email || PRIMARY_ADMIN_EMAIL,
+              addedAt: new Date().toISOString(),
+            });
+            isAdminUser = true;
+          }
+        } catch (e) {
+          console.warn('Verificación de admins en Firestore:', e);
+          if (isPrimaryAdmin) isAdminUser = true;
+        }
+
+        // 2. Check existing /users/{uid}
+        const userDocRef = doc(db, 'users', user.uid);
+        const userSnap = await getDoc(userDocRef);
+
+        let finalRole: UserRole | null = null;
+        let displayName = user.displayName || (isAdminUser ? 'Administrador Pollos Karen' : 'Personal');
+        let isActive = false;
+
+        if (userSnap.exists()) {
+          const data = userSnap.data();
+          const storedRole = data.role as UserRole;
+          finalRole = isAdminUser
+            ? 'admin'
+            : storedRole === 'admin' || storedRole === 'colaborador' || storedRole === 'cocina'
+              ? storedRole
+              : 'colaborador';
+          displayName = data.displayName || displayName;
+          isActive = data.active !== false;
+        } else if (isPrimaryAdmin || isAdminUser) {
+          // Bootstrap primary or pre-registered admin into /users/{uid}
+          finalRole = 'admin';
+          isActive = true;
+          const newProfile: AppUser = {
+            uid: user.uid,
+            email: user.email || '',
+            displayName,
+            role: 'admin',
+            active: true,
+            createdAt: new Date().toISOString(),
+          };
+          await setDoc(userDocRef, newProfile);
+        } else if (userEmail) {
+          // Check pre-authorized staff invitation created by an Administrator
+          const inviteId = normalizeInviteId(userEmail);
+          try {
+            const inviteRef = doc(db, 'user_invites', inviteId);
+            const inviteSnap = await getDoc(inviteRef);
+            if (inviteSnap.exists()) {
+              const inviteData = inviteSnap.data() as UserInvite;
+              if (
+                inviteData.active !== false &&
+                inviteData.email?.toLowerCase() === userEmail &&
+                (inviteData.role === 'colaborador' || inviteData.role === 'cocina')
+              ) {
+                finalRole = inviteData.role;
+                displayName = inviteData.displayName || displayName;
+                isActive = true;
+                const nowIso = new Date().toISOString();
+                await setDoc(userDocRef, {
+                  uid: user.uid,
+                  email: user.email || userEmail,
+                  displayName,
+                  role: finalRole,
+                  active: true,
+                  createdAt: nowIso,
+                });
+              }
+            }
+          } catch (inviteErr) {
+            console.warn('No se encontró invitación preautorizada:', inviteErr);
+          }
+        }
+
+        // 3. Reject unauthorized or deactivated accounts immediately (NO public self-registration)
+        if (!finalRole) {
+          await signOut(auth);
+          setCurrentUser(null);
+          setAppUser(null);
+          setRole(null);
+          setAuthBlockedMessage(
+            'Cuenta no autorizada. Por seguridad interna, solo el personal habilitado por el administrador de Pollos Karen puede ingresar.'
+          );
+          setLoading(false);
+          return;
+        }
+
+        if (!isActive && !isPrimaryAdmin) {
+          await signOut(auth);
+          setCurrentUser(null);
+          setAppUser(null);
+          setRole(null);
+          setAuthBlockedMessage(
+            'Su cuenta ha sido desactivada. Comuníquese con el administrador de Pollos Karen.'
+          );
+          setLoading(false);
+          return;
+        }
+
+        const resolvedProfile: AppUser = {
+          uid: user.uid,
+          email: user.email || '',
+          displayName,
+          role: finalRole,
+          active: true,
+        };
+
+        setAuthBlockedMessage(null);
+        setCurrentUser(user);
+        setAppUser(resolvedProfile);
+        setRole(finalRole);
+        setLoading(false);
+
+        // 4. Real-time session revocation & role synchronization listener
+        unsubOwnProfile = onSnapshot(
+          userDocRef,
+          liveSnap => {
+            if (!liveSnap.exists()) {
+              if (!isPrimaryAdmin) {
+                setAuthBlockedMessage('Su perfil fue revocado por el administrador.');
+                signOut(auth).catch(() => {});
+              }
+              return;
+            }
+            const liveData = liveSnap.data();
+            const liveActive = liveData.active !== false;
+            if (!liveActive && !isPrimaryAdmin) {
+              setAuthBlockedMessage('Su cuenta ha sido suspendida por el administrador.');
+              signOut(auth).catch(() => {});
+              return;
+            }
+            const liveRole: UserRole = isPrimaryAdmin
+              ? 'admin'
+              : liveData.role === 'admin' || liveData.role === 'colaborador' || liveData.role === 'cocina'
+                ? liveData.role
+                : 'colaborador';
+
+            setRole(liveRole);
+            setAppUser({
+              uid: user.uid,
+              email: liveData.email || user.email || '',
+              displayName: liveData.displayName || displayName,
+              role: liveRole,
+              active: liveActive,
+            });
+          },
+          err => {
+            console.warn('Escucha de perfil propio interrumpida:', err);
+          }
+        );
+      } catch (error) {
+        console.error('Error verificando autorización de usuario:', error);
+        await signOut(auth).catch(() => {});
+        setCurrentUser(null);
+        setAppUser(null);
+        setRole(null);
+        setAuthBlockedMessage(
+          'No fue posible verificar la autorización de su cuenta. Intente nuevamente o contacte al administrador.'
+        );
+        setLoading(false);
+      }
     });
 
-    return () => unsubscribe();
+    return () => {
+      if (unsubOwnProfile) unsubOwnProfile();
+      unsubscribe();
+    };
   }, []);
 
-  // Subscribe to users list when logged in as admin
+  // Subscribe to users list & pre-authorized invites when logged in as admin
   useEffect(() => {
     if (!currentUser || role !== 'admin') {
       setUsersList([]);
+      setUserInvites([]);
       return;
     }
 
@@ -156,25 +312,43 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
     );
 
-    return () => unsubUsers();
+    const unsubInvites = onSnapshot(
+      collection(db, 'user_invites'),
+      snapshot => {
+        const list: UserInvite[] = snapshot.docs.map(d => ({
+          id: d.id,
+          ...(d.data() as Omit<UserInvite, 'id'>),
+        }));
+        list.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+        setUserInvites(list);
+      },
+      err => {
+        console.warn('Error cargando invitaciones:', err);
+      }
+    );
+
+    return () => {
+      unsubUsers();
+      unsubInvites();
+    };
   }, [currentUser, role]);
 
   const loginWithGoogle = async () => {
-    try {
-      await signInWithPopup(auth, googleProvider);
-    } catch (error) {
-      console.error('Error al autenticar con Google:', error);
-      throw error;
-    }
+    setAuthBlockedMessage(null);
+    await signInWithPopup(auth, googleProvider);
   };
 
   const loginWithEmail = async (email: string, pass: string) => {
-    try {
-      await signInWithEmailAndPassword(auth, email.trim(), pass);
-    } catch (error) {
-      console.error('Error al iniciar sesión con correo:', error);
-      throw error;
+    setAuthBlockedMessage(null);
+    await signInWithEmailAndPassword(auth, email.trim(), pass);
+  };
+
+  const sendPasswordReset = async (email: string) => {
+    const cleanEmail = email.trim();
+    if (!cleanEmail) {
+      throw new Error('Ingrese su correo electrónico para restablecer la contraseña.');
     }
+    await sendPasswordResetEmail(auth, cleanEmail);
   };
 
   const createStaffAccount = async (
@@ -187,58 +361,90 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       throw new Error('Solo un administrador puede crear nuevas cuentas de personal.');
     }
 
-    const cleanEmail = email.trim();
-    const cleanName = displayName.trim();
-
-    try {
-      // Use a secondary Firebase App instance so creating the user does not sign out the active Administrator
-      const secondaryAppName = 'StaffAccountCreatorApp';
-      const existingSecondary = getApps().find(a => a.name === secondaryAppName);
-      const secondaryApp = existingSecondary || initializeApp(firebaseConfig, secondaryAppName);
-      const secondaryAuth = getAuth(secondaryApp);
-
-      const cred = await createUserWithEmailAndPassword(secondaryAuth, cleanEmail, pass);
-      const newUser = cred.user;
-      await signOut(secondaryAuth);
-
-      const nowIso = new Date().toISOString();
-
-      // Create /users/{uid} using the active Admin's Firestore session
-      await setDoc(doc(db, 'users', newUser.uid), {
-        uid: newUser.uid,
-        email: cleanEmail,
-        displayName: cleanName,
-        role: targetRole,
-        active: true,
-        createdAt: nowIso,
-      });
-
-      // If admin, also create /admins/{uid}
-      if (targetRole === 'admin') {
-        await setDoc(doc(db, 'admins', newUser.uid), {
-          email: cleanEmail,
-          addedAt: nowIso,
-        });
-      }
-
-      // Record audit log
-      const audId = `aud_usr_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-      await setDoc(doc(db, 'audit_logs', audId), {
-        id: audId,
-        action: 'manage_user',
-        collection: 'users',
-        documentId: newUser.uid,
-        reason: `Creación de cuenta de personal (${targetRole.toUpperCase()})`,
-        performedBy: appUser?.displayName || currentUser?.email || 'Administrador',
-        performedByUid: currentUser?.uid || '',
-        performedByEmail: currentUser?.email || '',
-        timestamp: nowIso,
-        details: `Usuario creado: ${cleanName} (${cleanEmail}) con rol ${targetRole}.`,
-      });
-    } catch (error) {
-      console.error('Error al registrar cuenta de colaborador/administrador:', error);
-      throw error;
+    const passError = validateStrongPassword(pass);
+    if (passError) {
+      throw new Error(passError);
     }
+
+    const cleanEmail = email.trim().toLowerCase();
+    const cleanName = displayName.trim();
+    if (!cleanEmail || !cleanName) {
+      throw new Error('Debe completar el nombre y el correo electrónico.');
+    }
+
+    const secondaryAppName = 'StaffAccountCreatorApp';
+    const existingSecondary = getApps().find(a => a.name === secondaryAppName);
+    const secondaryApp = existingSecondary || initializeApp(firebaseConfig, secondaryAppName);
+    const secondaryAuth = getAuth(secondaryApp);
+
+    const cred = await createUserWithEmailAndPassword(secondaryAuth, cleanEmail, pass);
+    const newUser = cred.user;
+    await signOut(secondaryAuth);
+
+    const nowIso = new Date().toISOString();
+
+    await setDoc(doc(db, 'users', newUser.uid), {
+      uid: newUser.uid,
+      email: cleanEmail,
+      displayName: cleanName,
+      role: targetRole,
+      active: true,
+      createdAt: nowIso,
+    });
+
+    if (targetRole === 'admin') {
+      await setDoc(doc(db, 'admins', newUser.uid), {
+        email: cleanEmail,
+        addedAt: nowIso,
+      });
+    }
+
+    const audId = `aud_usr_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+    await setDoc(doc(db, 'audit_logs', audId), {
+      id: audId,
+      action: 'manage_user',
+      collection: 'users',
+      documentId: newUser.uid,
+      reason: `Creación de cuenta de personal (${targetRole.toUpperCase()})`,
+      performedBy: appUser?.displayName || currentUser?.email || 'Administrador',
+      performedByUid: currentUser?.uid || '',
+      performedByEmail: currentUser?.email || '',
+      timestamp: nowIso,
+      details: `Usuario creado: ${cleanName} (${cleanEmail}) con rol ${targetRole}.`,
+    });
+  };
+
+  const createUserInvite = async (email: string, displayName: string, targetRole: UserRole) => {
+    if (role !== 'admin') {
+      throw new Error('Solo un administrador puede preautorizar correos de Google.');
+    }
+    if (targetRole === 'admin') {
+      throw new Error('Por seguridad, cree cuentas de administrador directamente o promueva una cuenta verificada.');
+    }
+    const cleanEmail = email.trim().toLowerCase();
+    const cleanName = displayName.trim();
+    if (!cleanEmail || !cleanName) {
+      throw new Error('Complete nombre y correo electrónico.');
+    }
+    const inviteId = normalizeInviteId(cleanEmail);
+    const nowIso = new Date().toISOString();
+    await setDoc(doc(db, 'user_invites', inviteId), {
+      id: inviteId,
+      email: cleanEmail,
+      displayName: cleanName,
+      role: targetRole,
+      active: true,
+      invitedBy: appUser?.displayName || currentUser?.email || 'Administrador',
+      createdAt: nowIso,
+    });
+  };
+
+  const revokeUserInvite = async (email: string) => {
+    if (role !== 'admin') {
+      throw new Error('Solo un administrador puede revocar autorizaciones.');
+    }
+    const inviteId = normalizeInviteId(email);
+    await deleteDoc(doc(db, 'user_invites', inviteId));
   };
 
   const updateUserRole = async (targetUid: string, newRole: UserRole, email: string) => {
@@ -262,7 +468,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           addedAt: nowIso,
         });
       } else {
-        await deleteDoc(doc(db, 'admins', targetUid));
+        await deleteDoc(doc(db, 'admins', targetUid)).catch(() => {});
       }
 
       const audId = `aud_role_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
@@ -325,19 +531,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const logout = async () => {
-    try {
-      await signOut(auth);
-      setCurrentUser(null);
-      setAppUser(null);
-      setRole(null);
-    } catch (error) {
-      console.error('Error al cerrar sesión:', error);
-      throw error;
-    }
+    await signOut(auth);
+    setCurrentUser(null);
+    setAppUser(null);
+    setRole(null);
   };
 
   const isAdmin = role === 'admin';
   const isColaborador = role === 'colaborador';
+  const isCocina = role === 'cocina';
 
   return (
     <AuthContext.Provider
@@ -347,11 +549,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         role,
         isAdmin,
         isColaborador,
+        isCocina,
         loading,
+        authBlockedMessage,
+        clearAuthBlockedMessage,
         usersList,
+        userInvites,
         loginWithGoogle,
         loginWithEmail,
+        sendPasswordReset,
         createStaffAccount,
+        createUserInvite,
+        revokeUserInvite,
         updateUserRole,
         toggleUserActive,
         logout,

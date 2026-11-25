@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
 import {
   collection,
   doc,
@@ -12,6 +12,7 @@ import {
   query,
   orderBy,
   limit,
+  increment,
 } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType, sanitizeForFirestore } from '../config/firebase';
 import { useAuth } from './AuthContext';
@@ -32,18 +33,44 @@ import {
   CasadoProtein,
   AuditLog,
   InventoryMovement,
-  PurchaseLineItem,
   OrderStatus,
+  OperationalOrderStatus,
+  FinancialOrderStatus,
   Recipe,
+  PaymentRecord,
+  DeliveryDetails,
+  KitchenOrderProjection,
+  RestaurantConfig,
+  Supplier,
+  DenominationCount,
+  CreditPaymentEntry,
 } from '../types';
-import { INITIAL_TABLES, INITIAL_CATEGORIES, INITIAL_PRODUCTS, INITIAL_INVENTORY_ITEMS, INITIAL_RECIPES } from '../config/initialData';
-import { calculateOrderTotals, getCostaRicaDateString, generateOrderNumber } from '../utils/formatters';
+import {
+  INITIAL_TABLES,
+  INITIAL_CATEGORIES,
+  INITIAL_PRODUCTS,
+  INITIAL_INVENTORY_ITEMS,
+  INITIAL_RECIPES,
+} from '../config/initialData';
+import { getCostaRicaDateString, generateOrderNumber } from '../utils/formatters';
 import {
   calculateWeightedAverageCost,
   convertToInventoryUnit,
   normalizeUnitString,
 } from '../utils/unitConverter';
-import { createKitchenTicketFromOrder, printKitchenTicket } from '../utils/thermalPrinter';
+import {
+  calculateExpectedCash,
+  calculateIngredientConsumption,
+  calculateOrderTotalsDetailed,
+  DEFAULT_RESTAURANT_CONFIG,
+  resolveFinancialStatus,
+  resolveOperationalStatus,
+  toLegacyOrderStatus,
+} from '../utils/orderStateMachine';
+import {
+  createKitchenTicketFromOrder,
+  printKitchenTicket,
+} from '../utils/thermalPrinter';
 import {
   saveOfflineOrder,
   getOfflineOrders,
@@ -51,22 +78,156 @@ import {
   saveOfflineMutation,
   getOfflineMutations,
   removeOfflineMutation,
+  updateOfflineMutationStatus,
   getOfflinePendingCount,
 } from '../utils/offlineQueue';
+import {
+  buildSanitizedBackup,
+  restoreBackupInChunks,
+  validateBackupPayload,
+  BackupValidationResult,
+} from '../utils/backupManager';
+import { POLLOS_KAREN_CATEGORIES, POLLOS_KAREN_PRODUCTS } from '../config/pollosKarenCatalog';
+import {
+  buildCashRegisterClosePatch,
+  buildDeterministicPaymentId,
+  buildPurchaseInvoiceLockId,
+  evaluateTransactionalPayment,
+} from '../utils/concurrencyGuards';
+
+export interface RecipeFormulaDoc {
+  id: string;
+  productId: string;
+  protein?: CasadoProtein;
+  yieldPortions: number;
+  autoDeductEnabled: boolean;
+  ingredients: Array<{
+    itemId: string;
+    itemName: string;
+    quantity: number;
+    unit: string;
+    inventoryUnit: string;
+  }>;
+  updatedAt: string;
+}
+
+export interface PaymentEntryInput {
+  method: 'efectivo' | 'sinpe' | 'tarjeta';
+  amount: number;
+  receivedCash?: number;
+  sinpeReference?: string;
+  cardAuthCode?: string;
+}
+
+export interface PendingPublicOrderItem {
+  trackingCode: string;
+  orderNumber: string;
+  serviceType: 'mesa' | 'expres';
+  tableId?: string;
+  tableName?: string;
+  items: Array<{
+    id: string;
+    productId: string;
+    name: string;
+    price: number;
+    quantity: number;
+    protein?: CasadoProtein;
+    notes?: string;
+    subtotal: number;
+  }>;
+  subtotal: number;
+  serviceCharge: number;
+  deliveryFee: number;
+  total: number;
+  observations?: string;
+  deliveryDetails?: DeliveryDetails;
+  operationalStatus: OperationalOrderStatus;
+  source: 'qr_mesa' | 'menu_expres';
+  createdAt: string;
+}
+
+const CLOSED_PLACEHOLDER_REGISTER = (dateStr: string): CashRegister => ({
+  id: '',
+  date: dateStr,
+  status: 'closed',
+  openedAt: '',
+  openedBy: '',
+  initialCash: 0,
+  cashSales: 0,
+  sinpeSales: 0,
+  cardSales: 0,
+  cashDeposits: 0,
+  cashWithdrawals: 0,
+  cashRefunds: 0,
+  cashPurchases: 0,
+  cashExpenses: 0,
+  expectedCash: 0,
+});
+
+function buildKitchenProjection(order: RestaurantOrder, opStatus: OperationalOrderStatus): KitchenOrderProjection {
+  const nowIso = new Date().toISOString();
+  return {
+    id: order.id,
+    orderId: order.id,
+    orderNumber: order.orderNumber,
+    serviceType: order.serviceType,
+    tableName: order.tableName,
+    operationalStatus: opStatus,
+    items: order.items.map(it => ({
+      id: it.id,
+      name: it.name,
+      quantity: it.quantity,
+      selectedProtein: it.selectedProtein,
+      notes: it.notes,
+    })),
+    observations: order.observations,
+    createdAt: order.createdAt || nowIso,
+    operationalDate: order.operationalDate || getCostaRicaDateString(),
+    authorizedAt: order.authorizedAt || order.createdAt || nowIso,
+    startedAt: order.startedAt,
+    readyAt: order.readyAt,
+    updatedAt: nowIso,
+  };
+}
+
+function generateSecureToken(): string {
+  const bytes = new Uint8Array(12);
+  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+    crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+  }
+  return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+}
 
 interface POSContextType {
+  // Config
+  restaurantConfig: RestaurantConfig;
+  updateRestaurantConfig: (patch: Partial<RestaurantConfig>) => Promise<void>;
+
   // Catalog & Tables
   tables: RestaurantTable[];
   categories: ProductCategory[];
   products: ProductItem[];
   selectedTable: RestaurantTable | null;
   selectTable: (table: RestaurantTable | null) => void;
-  updateTableStatus: (tableId: string, status: RestaurantTable['status'], currentOrderId?: string | null) => Promise<void>;
+  updateTableStatus: (
+    tableId: string,
+    status: RestaurantTable['status'],
+    currentOrderId?: string | null
+  ) => Promise<void>;
   addTable: (name: string, number: number, type: 'table' | 'bar', seats: number) => Promise<void>;
   toggleTableActive: (tableId: string) => Promise<void>;
+  rotateTableQRToken: (tableId: string) => Promise<string>;
+  toggleTableQR: (tableId: string, enabled: boolean) => Promise<void>;
+  importPollosKarenOfficialMenu: (options?: {
+    updateExistingPrices?: boolean;
+  }) => Promise<{ categoriesAdded: number; productsAdded: number; productsUpdated: number }>;
 
-  // Active Orders
+  // Active Orders & Separated States
   orders: RestaurantOrder[];
+  kitchenOrders: KitchenOrderProjection[];
+  pendingPublicOrders: PendingPublicOrderItem[];
   currentOrder: RestaurantOrder | null;
   setCurrentOrder: (order: RestaurantOrder | null) => void;
   createNewOrder: (serviceType: ServiceType, table?: RestaurantTable) => RestaurantOrder;
@@ -74,9 +235,37 @@ interface POSContextType {
   updateOrderItemQuantity: (lineItemId: string, delta: number) => void;
   removeOrderItem: (lineItemId: string) => void;
   setOrderObservations: (observations: string) => void;
-  saveActiveOrder: () => Promise<{ success: boolean; order?: RestaurantOrder; error?: string }>;
+  setOrderDeliveryDetails: (details: DeliveryDetails | undefined) => void;
+  setOrderDiscount: (discount: number, reason?: string) => void;
+  saveActiveOrder: (options?: {
+    authorizeToKitchen?: boolean;
+  }) => Promise<{ success: boolean; order?: RestaurantOrder; error?: string }>;
+  authorizeOrderToKitchen: (orderId: string) => Promise<{ success: boolean; error?: string }>;
+  updateKitchenOrderStatus: (
+    orderId: string,
+    nextStatus: 'in_preparation' | 'ready'
+  ) => Promise<void>;
+  markOrderDelivered: (orderId: string) => Promise<void>;
   updateOrderStatus: (orderId: string, status: OrderStatus) => Promise<void>;
-  cancelOrder: (orderId: string, reason: string) => Promise<void>;
+  cancelOrder: (
+    orderId: string,
+    reason: string,
+    inventoryDisposition?: 'restored' | 'waste' | 'none'
+  ) => Promise<void>;
+  transferTableOrder: (
+    orderId: string,
+    targetTableId: string
+  ) => Promise<{ success: boolean; error?: string }>;
+  mergeTableOrders: (
+    sourceOrderId: string,
+    targetOrderId: string
+  ) => Promise<{ success: boolean; error?: string }>;
+  splitOrderItems: (
+    orderId: string,
+    splitSelections: Array<{ lineItemId: string; quantity: number }>
+  ) => Promise<{ success: boolean; newOrder?: RestaurantOrder; error?: string }>;
+  acceptPublicOrder: (trackingCode: string) => Promise<{ success: boolean; order?: RestaurantOrder; error?: string }>;
+  rejectPublicOrder: (trackingCode: string) => Promise<void>;
 
   // Kitchen Tickets
   kitchenTickets: KitchenTicket[];
@@ -84,25 +273,75 @@ interface POSContextType {
   activeTicketToPrint: KitchenTicket | null;
   setActiveTicketToPrint: (ticket: KitchenTicket | null) => void;
 
-  // Checkout & Cash Register
+  // Payments & Cash Register (Explicit Open/Close)
+  payments: PaymentRecord[];
   cashRegister: CashRegister;
+  activeCashRegister: CashRegister | null;
+  hasOpenCashRegister: boolean;
+  cashRegistersHistory: CashRegister[];
+  staleOpenRegisters: CashRegister[];
   cashMovements: CashMovement[];
-  completeOrderPayment: (orderId: string, method: PaymentMethod, receivedCash?: number) => Promise<{ success: boolean; change?: number; error?: string }>;
-  recordPhysicalCount: (actualCash: number, notes?: string) => Promise<void>;
-  openNewDayRegister: (initialFloat: number) => Promise<void>;
+  recordOrderPayment: (
+    orderId: string,
+    entries: PaymentEntryInput[]
+  ) => Promise<{
+    success: boolean;
+    change?: number;
+    payments?: PaymentRecord[];
+    error?: string;
+  }>;
+  completeOrderPayment: (
+    orderId: string,
+    method: PaymentMethod,
+    receivedCash?: number,
+    meta?: { sinpeReference?: string; cardAuthCode?: string }
+  ) => Promise<{ success: boolean; change?: number; error?: string }>;
+  refundPayment: (paymentId: string, reason: string) => Promise<{ success: boolean; error?: string }>;
+  recordPhysicalCount: (
+    actualCash: number,
+    notes?: string,
+    denominations?: DenominationCount[]
+  ) => Promise<void>;
+  closeCashRegister: (
+    actualCash: number,
+    notes?: string,
+    denominations?: DenominationCount[],
+    targetRegisterId?: string
+  ) => Promise<{ success: boolean; register?: CashRegister; error?: string }>;
+  openNewDayRegister: (
+    initialFloat: number,
+    denominations?: DenominationCount[]
+  ) => Promise<void>;
+  reopenCashRegister: (registerId: string, reason: string) => Promise<void>;
+  recordCashDrawerMovement: (
+    type: 'deposit' | 'withdrawal',
+    amount: number,
+    reason: string
+  ) => Promise<void>;
 
-  // Recipes & Formulation (Fase 3)
+  // Recipes & Formulation
   recipes: Recipe[];
   saveRecipe: (recipe: Recipe) => Promise<void>;
   toggleRecipeAutoDeduct: (recipeId: string) => Promise<void>;
   registerWaste: (itemId: string, quantity: number, reason: string, notes?: string) => Promise<void>;
   saveProduct: (product: ProductItem) => Promise<void>;
 
-  // Inventory & Purchases
+  // Inventory, Suppliers & Purchases (CxP)
   inventory: InventoryItem[];
   inventoryMovements: InventoryMovement[];
+  suppliers: Supplier[];
+  saveSupplier: (supplier: Omit<Supplier, 'id' | 'createdAt'> & { id?: string }) => Promise<void>;
   purchases: PurchaseRecord[];
-  addPurchase: (purchase: Omit<PurchaseRecord, 'id' | 'createdAt' | 'registeredBy'>) => Promise<void>;
+  addPurchase: (
+    purchase: Omit<PurchaseRecord, 'id' | 'createdAt' | 'registeredBy'>
+  ) => Promise<void>;
+  recordCreditPurchasePayment: (
+    purchaseId: string,
+    amount: number,
+    method: 'efectivo' | 'transferencia' | 'tarjeta',
+    paidFromCashRegister: boolean,
+    notes?: string
+  ) => Promise<void>;
   updateInventoryStock: (itemId: string, newStock: number, reason: string) => Promise<void>;
 
   // Expenses
@@ -112,11 +351,20 @@ interface POSContextType {
 
   // Audit Logs
   auditLogs: AuditLog[];
-  addAuditLog: (action: string, collectionName: string, documentId: string, reason: string, details?: string) => Promise<void>;
+  addAuditLog: (
+    action: string,
+    collectionName: string,
+    documentId: string,
+    reason: string,
+    details?: string
+  ) => Promise<void>;
 
   // Backup and Restore
   exportDataBackup: () => string;
-  restoreDataBackup: (backupJson: string) => Promise<{ success: boolean; message: string; count: number }>;
+  previewDataBackup: (backupJson: string) => BackupValidationResult;
+  restoreDataBackup: (
+    backupJson: string
+  ) => Promise<{ success: boolean; message: string; count: number }>;
 
   // Offline Status & Multi-Device Sync
   isOnline: boolean;
@@ -127,364 +375,631 @@ interface POSContextType {
 const POSContext = createContext<POSContextType | undefined>(undefined);
 
 export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { currentUser, appUser, isAdmin } = useAuth();
+  const { currentUser, appUser, role, isAdmin, isCocina } = useAuth();
 
-  // Network & Sync State
-  const [isOnline, setIsOnline] = useState<boolean>(typeof navigator !== 'undefined' ? navigator.onLine : true);
+  const [isOnline, setIsOnline] = useState<boolean>(
+    typeof navigator !== 'undefined' ? navigator.onLine : true
+  );
   const [pendingOfflineCount, setPendingOfflineCount] = useState<number>(0);
 
-  // Core Real-Time State
+  // Operational Config
+  const [restaurantConfig, setRestaurantConfig] = useState<RestaurantConfig>(
+    DEFAULT_RESTAURANT_CONFIG
+  );
+
+  // Catalog & Tables
   const [tables, setTables] = useState<RestaurantTable[]>(INITIAL_TABLES);
   const [categories, setCategories] = useState<ProductCategory[]>(INITIAL_CATEGORIES);
   const [products, setProducts] = useState<ProductItem[]>(INITIAL_PRODUCTS);
-  const [orders, setOrders] = useState<RestaurantOrder[]>([]);
   const [selectedTable, setSelectedTable] = useState<RestaurantTable | null>(null);
+
+  // Orders & KDS
+  const [orders, setOrders] = useState<RestaurantOrder[]>([]);
+  const [kitchenOrders, setKitchenOrders] = useState<KitchenOrderProjection[]>([]);
+  const [pendingPublicOrders, setPendingPublicOrders] = useState<PendingPublicOrderItem[]>([]);
   const [currentOrder, setCurrentOrder] = useState<RestaurantOrder | null>(null);
 
-  // Tickets
+  // Tickets & Payments
   const [kitchenTickets, setKitchenTickets] = useState<KitchenTicket[]>([]);
   const [activeTicketToPrint, setActiveTicketToPrint] = useState<KitchenTicket | null>(null);
+  const [payments, setPayments] = useState<PaymentRecord[]>([]);
 
-  // Cash Register
+  // Cash Registers (NO automatic ₡50,000 open shift!)
   const todayCR = getCostaRicaDateString();
-  const [cashRegister, setCashRegister] = useState<CashRegister>({
-    id: `reg_${todayCR}`,
-    date: todayCR,
-    status: 'open',
-    openedAt: new Date().toISOString(),
-    openedBy: 'Administración Karen',
-    initialCash: 50000,
-    cashSales: 0,
-    sinpeSales: 0,
-    cardSales: 0,
-    cashPurchases: 0,
-    cashExpenses: 0,
-    expectedCash: 50000,
-  });
+  const [cashRegistersHistory, setCashRegistersHistory] = useState<CashRegister[]>([]);
   const [cashMovements, setCashMovements] = useState<CashMovement[]>([]);
 
-  // Recipes State (Fase 3)
-  const [recipes, setRecipes] = useState<Recipe[]>(INITIAL_RECIPES);
+  // Derived active & stale cash registers
+  const openRegisters = cashRegistersHistory.filter(r => r.status === 'open');
+  const activeCashRegister =
+    openRegisters.find(r => r.date === todayCR) || openRegisters[0] || null;
+  const staleOpenRegisters = openRegisters.filter(r => r.date < todayCR);
+  const hasOpenCashRegister = Boolean(activeCashRegister && activeCashRegister.status === 'open');
+  const cashRegister: CashRegister =
+    activeCashRegister ||
+    cashRegistersHistory.find(r => r.date === todayCR) ||
+    CLOSED_PLACEHOLDER_REGISTER(todayCR);
 
-  // Inventory, Purchases & Expenses
+  // Recipes & Formulas
+  const [recipes, setRecipes] = useState<Recipe[]>(INITIAL_RECIPES);
+  const [recipeFormulas, setRecipeFormulas] = useState<RecipeFormulaDoc[]>([]);
+
+  // Admin Collections
   const [inventory, setInventory] = useState<InventoryItem[]>(INITIAL_INVENTORY_ITEMS);
   const [inventoryMovements, setInventoryMovements] = useState<InventoryMovement[]>([]);
+  const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [purchases, setPurchases] = useState<PurchaseRecord[]>([]);
   const [expenses, setExpenses] = useState<OperatingExpense[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
 
-  const isInitialMount = useRef(true);
+  const isStaff = role === 'admin' || role === 'colaborador';
 
-  // --------------------------------------------------------------------------
-  // FIRESTORE REAL-TIME SYNCHRONIZATION (Multi-Device)
-  // --------------------------------------------------------------------------
+  const getActorName = useCallback(
+    () => appUser?.displayName || currentUser?.email || 'Operador',
+    [appUser, currentUser]
+  );
+
+  // ------------------------------------------------------------------------
+  // AUDIT LOG HELPER
+  // ------------------------------------------------------------------------
+  const addAuditLog = useCallback(
+    async (
+      action: string,
+      collectionName: string,
+      documentId: string,
+      reason: string,
+      details?: string
+    ) => {
+      if (!currentUser || isCocina) return;
+      const logId = `aud_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+      const entry: AuditLog = {
+        id: logId,
+        action,
+        collection: collectionName,
+        documentId,
+        reason,
+        performedBy: getActorName(),
+        performedByUid: currentUser.uid,
+        performedByEmail: currentUser.email || '',
+        timestamp: new Date().toISOString(),
+        details,
+      };
+      try {
+        await setDoc(doc(db, 'audit_logs', logId), sanitizeForFirestore(entry));
+      } catch (err) {
+        console.warn('No se pudo registrar auditoría:', err);
+      }
+    },
+    [currentUser, isCocina, getActorName]
+  );
+
+  // ------------------------------------------------------------------------
+  // ROLE-SCOPED & BOUNDED FIRESTORE SUBSCRIPTIONS
+  // ------------------------------------------------------------------------
   useEffect(() => {
-    if (!currentUser) return;
+    if (!currentUser || !role) return;
 
-    const unsubscribers: (() => void)[] = [];
+    const unsubs: Array<() => void> = [];
 
-    // 1. Tables Listener
-    const tablesCol = collection(db, 'tables');
-    const unsubTables = onSnapshot(
-      tablesCol,
-      snapshot => {
-        if (!snapshot.empty) {
-          const list: RestaurantTable[] = snapshot.docs.map(d => ({
-            id: d.id,
-            ...(d.data() as Omit<RestaurantTable, 'id'>),
-          }));
-          list.sort((a, b) => a.number - b.number);
-          setTables(list);
-        } else if (isAdmin) {
-          // Seed initial tables if collection is completely fresh
-          INITIAL_TABLES.forEach(async tbl => {
-            try {
-              await setDoc(doc(db, 'tables', tbl.id), tbl);
-            } catch (err) {
-              console.warn('Error inicializando mesa:', err);
-            }
-          });
-        }
-      },
-      error => handleFirestoreError(error, OperationType.GET, 'tables')
+    // 1. Restaurant Config (all active roles)
+    unsubs.push(
+      onSnapshot(
+        doc(db, 'restaurant_config', 'main'),
+        snap => {
+          if (snap.exists()) {
+            setRestaurantConfig({
+              ...DEFAULT_RESTAURANT_CONFIG,
+              ...(snap.data() as Partial<RestaurantConfig>),
+            });
+          }
+        },
+        err => console.warn('Config listener:', err)
+      )
     );
-    unsubscribers.push(unsubTables);
 
-    // 2. Categories Listener
-    const categoriesCol = collection(db, 'categories');
-    const unsubCategories = onSnapshot(
-      categoriesCol,
-      snapshot => {
-        if (!snapshot.empty) {
-          const list: ProductCategory[] = snapshot.docs.map(d => ({
-            id: d.id,
-            ...(d.data() as Omit<ProductCategory, 'id'>),
-          }));
-          list.sort((a, b) => a.order - b.order);
+    // 2. Sanitized Kitchen Orders (all active roles — primary feed for Cocina KDS!)
+    unsubs.push(
+      onSnapshot(
+        query(collection(db, 'kitchen_orders'), orderBy('authorizedAt', 'desc'), limit(80)),
+        snap => {
+          const list = snap.docs.map(d => d.data() as KitchenOrderProjection);
+          setKitchenOrders(list);
+        },
+        err => console.warn('Kitchen orders listener:', err)
+      )
+    );
+
+    // STRICT ISOLATION: Cocina role stops here (zero reads to orders, cash, costs, or admin collections!)
+    if (role === 'cocina') {
+      return () => unsubs.forEach(u => u());
+    }
+
+    // 3. Staff & Admin Operational Listeners (all bounded)
+    unsubs.push(
+      onSnapshot(collection(db, 'categories'), snap => {
+        if (!snap.empty) {
+          const list = snap.docs.map(d => ({ id: d.id, ...(d.data() as Omit<ProductCategory, 'id'>) }));
+          list.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
           setCategories(list);
-        } else if (isAdmin) {
-          INITIAL_CATEGORIES.forEach(async cat => {
-            try {
-              await setDoc(doc(db, 'categories', cat.id), cat);
-            } catch (err) {
-              console.warn('Error inicializando categoría:', err);
-            }
-          });
         }
-      },
-      error => handleFirestoreError(error, OperationType.GET, 'categories')
+      })
     );
-    unsubscribers.push(unsubCategories);
 
-    // 3. Products Listener
-    const productsCol = collection(db, 'products');
-    const unsubProducts = onSnapshot(
-      productsCol,
-      snapshot => {
-        if (!snapshot.empty) {
-          const list: ProductItem[] = snapshot.docs.map(d => ({
-            id: d.id,
-            ...(d.data() as Omit<ProductItem, 'id'>),
-          }));
+    unsubs.push(
+      onSnapshot(collection(db, 'products'), snap => {
+        if (!snap.empty) {
+          const list = snap.docs.map(d => ({ id: d.id, ...(d.data() as Omit<ProductItem, 'id'>) }));
           setProducts(list);
-        } else if (isAdmin) {
-          INITIAL_PRODUCTS.forEach(async prod => {
-            try {
-              await setDoc(doc(db, 'products', prod.id), prod);
-            } catch (err) {
-              console.warn('Error inicializando producto:', err);
-            }
-          });
         }
-      },
-      error => handleFirestoreError(error, OperationType.GET, 'products')
+      })
     );
-    unsubscribers.push(unsubProducts);
 
-    // 4. Orders Listener (Real-time live synchronization between tablets)
-    const ordersCol = collection(db, 'orders');
-    const unsubOrders = onSnapshot(
-      ordersCol,
-      snapshot => {
-        const list: RestaurantOrder[] = snapshot.docs.map(d => ({
-          id: d.id,
-          ...(d.data() as Omit<RestaurantOrder, 'id'>),
-        }));
-        // Sort descending by createdAt
-        list.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
-        setOrders(list);
-      },
-      error => handleFirestoreError(error, OperationType.GET, 'orders')
-    );
-    unsubscribers.push(unsubOrders);
-
-    // 5. Cash Register Listener & Automatic Midnight Closure of Previous Days
-    const activeRegDoc = doc(db, 'cash_registers', `reg_${todayCR}`);
-    const unsubReg = onSnapshot(
-      activeRegDoc,
-      snapshot => {
-        if (snapshot.exists()) {
-          setCashRegister({
-            id: snapshot.id,
-            ...(snapshot.data() as Omit<CashRegister, 'id'>),
-          });
-        } else {
-          // Initialize today's cash register period in Firestore
-          const initialDrawer: CashRegister = {
-            id: `reg_${todayCR}`,
-            date: todayCR,
-            status: 'open',
-            openedAt: new Date().toISOString(),
-            openedBy: appUser?.displayName || 'Administración',
-            initialCash: 50000,
-            cashSales: 0,
-            sinpeSales: 0,
-            cardSales: 0,
-            cashPurchases: 0,
-            cashExpenses: 0,
-            expectedCash: 50000,
-          };
-          setDoc(activeRegDoc, initialDrawer).catch(e => console.warn('Init register error:', e));
+    unsubs.push(
+      onSnapshot(collection(db, 'tables'), snap => {
+        if (!snap.empty) {
+          const list = snap.docs.map(d => ({ id: d.id, ...(d.data() as Omit<RestaurantTable, 'id'>) }));
+          list.sort((a, b) => (a.number ?? 0) - (b.number ?? 0));
+          setTables(list);
         }
-      },
-      error => handleFirestoreError(error, OperationType.GET, `cash_registers/reg_${todayCR}`)
+      })
     );
-    unsubscribers.push(unsubReg);
 
-    // Close any stale open cash registers from previous dates (Midnight Rollover)
+    unsubs.push(
+      onSnapshot(
+        query(collection(db, 'orders'), orderBy('createdAt', 'desc'), limit(250)),
+        snap => {
+          const list = snap.docs.map(d => {
+            const raw = d.data() as RestaurantOrder;
+            return {
+              ...raw,
+              id: d.id,
+              operationalStatus: resolveOperationalStatus(raw),
+              financialStatus: resolveFinancialStatus(raw),
+            };
+          });
+          setOrders(list);
+        },
+        err => console.warn('Orders listener:', err)
+      )
+    );
+
+    unsubs.push(
+      onSnapshot(
+        query(collection(db, 'payments'), orderBy('createdAt', 'desc'), limit(250)),
+        snap => {
+          setPayments(snap.docs.map(d => ({ id: d.id, ...(d.data() as Omit<PaymentRecord, 'id'>) })));
+        },
+        err => console.warn('Payments listener:', err)
+      )
+    );
+
+    unsubs.push(
+      onSnapshot(
+        query(collection(db, 'kitchen_tickets'), orderBy('printedAt', 'desc'), limit(100)),
+        snap => {
+          setKitchenTickets(
+            snap.docs.map(d => ({ id: d.id, ...(d.data() as Omit<KitchenTicket, 'id'>) }))
+          );
+        },
+        err => console.warn('Tickets listener:', err)
+      )
+    );
+
+    unsubs.push(
+      onSnapshot(
+        query(collection(db, 'cash_registers'), orderBy('openedAt', 'desc'), limit(30)),
+        snap => {
+          const list = snap.docs.map(d => ({ id: d.id, ...(d.data() as Omit<CashRegister, 'id'>) }));
+          setCashRegistersHistory(list);
+        },
+        err => console.warn('Cash registers listener:', err)
+      )
+    );
+
+    unsubs.push(
+      onSnapshot(
+        query(collection(db, 'cash_movements'), orderBy('createdAt', 'desc'), limit(200)),
+        snap => {
+          setCashMovements(
+            snap.docs.map(d => ({ id: d.id, ...(d.data() as Omit<CashMovement, 'id'>) }))
+          );
+        },
+        err => console.warn('Cash movements listener:', err)
+      )
+    );
+
+    unsubs.push(
+      onSnapshot(
+        collection(db, 'recipe_formulas'),
+        snap => {
+          setRecipeFormulas(
+            snap.docs.map(d => ({ id: d.id, ...(d.data() as Omit<RecipeFormulaDoc, 'id'>) }))
+          );
+        },
+        err => console.warn('Recipe formulas listener:', err)
+      )
+    );
+
+    // 4. Strictly Admin-Only Collections (Costs, Inventory, Purchases, Suppliers, Expenses, Audit)
     if (isAdmin) {
-      getDocs(collection(db, 'cash_registers'))
-        .then(snap => {
-          snap.docs.forEach(regDoc => {
-            const data = regDoc.data() as CashRegister;
-            if (data.status === 'open' && data.date && data.date < todayCR) {
-              updateDoc(doc(db, 'cash_registers', regDoc.id), {
-                status: 'closed',
-                closedAt: new Date().toISOString(),
-                notes: `${data.notes ? data.notes + ' | ' : ''}Cierre automático de medianoche (America/Costa_Rica)`,
-              }).catch(e => console.warn('Auto-close old register warning:', e));
-            }
-          });
+      unsubs.push(
+        onSnapshot(collection(db, 'inventory_items'), snap => {
+          if (!snap.empty) {
+            setInventory(
+              snap.docs.map(d => ({ id: d.id, ...(d.data() as Omit<InventoryItem, 'id'>) }))
+            );
+          }
         })
-        .catch(e => console.warn('Check previous cash registers warning:', e));
+      );
+
+      unsubs.push(
+        onSnapshot(
+          query(collection(db, 'inventory_movements'), orderBy('createdAt', 'desc'), limit(200)),
+          snap => {
+            setInventoryMovements(
+              snap.docs.map(d => ({ id: d.id, ...(d.data() as Omit<InventoryMovement, 'id'>) }))
+            );
+          }
+        )
+      );
+
+      unsubs.push(
+        onSnapshot(collection(db, 'recipes'), snap => {
+          if (!snap.empty) {
+            setRecipes(snap.docs.map(d => ({ id: d.id, ...(d.data() as Omit<Recipe, 'id'>) })));
+          }
+        })
+      );
+
+      unsubs.push(
+        onSnapshot(collection(db, 'suppliers'), snap => {
+          const list = snap.docs.map(d => ({ id: d.id, ...(d.data() as Omit<Supplier, 'id'>) }));
+          list.sort((a, b) => a.name.localeCompare(b.name));
+          setSuppliers(list);
+        })
+      );
+
+      unsubs.push(
+        onSnapshot(
+          query(collection(db, 'purchases'), orderBy('createdAt', 'desc'), limit(200)),
+          snap => {
+            setPurchases(
+              snap.docs.map(d => ({ id: d.id, ...(d.data() as Omit<PurchaseRecord, 'id'>) }))
+            );
+          }
+        )
+      );
+
+      unsubs.push(
+        onSnapshot(
+          query(collection(db, 'operating_expenses'), orderBy('dueDate', 'asc'), limit(200)),
+          snap => {
+            setExpenses(
+              snap.docs.map(d => ({ id: d.id, ...(d.data() as Omit<OperatingExpense, 'id'>) }))
+            );
+          }
+        )
+      );
+
+      unsubs.push(
+        onSnapshot(
+          query(collection(db, 'audit_logs'), orderBy('timestamp', 'desc'), limit(200)),
+          snap => {
+            setAuditLogs(snap.docs.map(d => ({ id: d.id, ...(d.data() as Omit<AuditLog, 'id'>) })));
+          }
+        )
+      );
     }
 
-    // 6. Cash Movements Listener
-    const movementsCol = collection(db, 'cash_movements');
-    const unsubMovements = onSnapshot(
-      movementsCol,
-      snapshot => {
-        const list: CashMovement[] = snapshot.docs.map(d => ({
-          id: d.id,
-          ...(d.data() as Omit<CashMovement, 'id'>),
-        }));
-        list.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
-        setCashMovements(list);
-      },
-      error => handleFirestoreError(error, OperationType.GET, 'cash_movements')
-    );
-    unsubscribers.push(unsubMovements);
+    return () => unsubs.forEach(u => u());
+  }, [currentUser, role, isAdmin]);
 
-    // 7. Kitchen Tickets Listener
-    const ticketsCol = collection(db, 'kitchen_tickets');
-    const unsubTickets = onSnapshot(
-      ticketsCol,
-      snapshot => {
-        const list: KitchenTicket[] = snapshot.docs.map(d => ({
-          id: d.id,
-          ...(d.data() as Omit<KitchenTicket, 'id'>),
-        }));
-        list.sort((a, b) => (b.printedAt || '').localeCompare(a.printedAt || ''));
-        setKitchenTickets(list);
-      },
-      error => handleFirestoreError(error, OperationType.GET, 'kitchen_tickets')
-    );
-    unsubscribers.push(unsubTickets);
+  // ------------------------------------------------------------------------
+  // SAFE INITIAL SEEDING FOR EMPTY FRESH WORKSPACE (Admin only, NEVER overwrites real data)
+  // ------------------------------------------------------------------------
+  const seededRef = useRef(false);
+  useEffect(() => {
+    if (!currentUser || !isAdmin || seededRef.current) return;
+    seededRef.current = true;
 
-    // 8. Inventory Items Listener (Catalog and stock tracking)
-    const invCol = collection(db, 'inventory_items');
-    const unsubInv = onSnapshot(
-      invCol,
-      snapshot => {
-        if (!snapshot.empty) {
-          const list: InventoryItem[] = snapshot.docs.map(d => ({
-            id: d.id,
-            ...(d.data() as Omit<InventoryItem, 'id'>),
-          }));
-          setInventory(list);
-        } else if (isAdmin) {
-          INITIAL_INVENTORY_ITEMS.forEach(async item => {
-            try {
-              await setDoc(doc(db, 'inventory_items', item.id), item);
-            } catch (err) {
-              console.warn('Error inicializando inventario:', err);
-            }
+    (async () => {
+      try {
+        const [catSnap, prodSnap, tblSnap] = await Promise.all([
+          getDocs(query(collection(db, 'categories'), limit(1))),
+          getDocs(query(collection(db, 'products'), limit(1))),
+          getDocs(query(collection(db, 'tables'), limit(1))),
+        ]);
+
+        const batch = writeBatch(db);
+        let hasWrites = false;
+
+        if (catSnap.empty) {
+          INITIAL_CATEGORIES.forEach(c => {
+            batch.set(doc(db, 'categories', c.id), sanitizeForFirestore(c));
           });
+          hasWrites = true;
         }
-      },
-      error => handleFirestoreError(error, OperationType.GET, 'inventory_items')
-    );
-    unsubscribers.push(unsubInv);
-
-    // 9. Recipes Listener (Formulations and automated deduction)
-    const recCol = collection(db, 'recipes');
-    const unsubRecipes = onSnapshot(
-      recCol,
-      snapshot => {
-        if (!snapshot.empty) {
-          const list: Recipe[] = snapshot.docs.map(d => ({
-            id: d.id,
-            ...(d.data() as Omit<Recipe, 'id'>),
-          }));
-          setRecipes(list);
-        } else if (isAdmin) {
-          INITIAL_RECIPES.forEach(async r => {
-            try {
-              await setDoc(doc(db, 'recipes', r.id), r);
-            } catch (err) {
-              console.warn('Error inicializando recetas:', err);
-            }
+        if (prodSnap.empty) {
+          INITIAL_PRODUCTS.forEach(p => {
+            batch.set(doc(db, 'products', p.id), sanitizeForFirestore(p));
           });
+          hasWrites = true;
         }
-      },
-      error => handleFirestoreError(error, OperationType.GET, 'recipes')
-    );
-    unsubscribers.push(unsubRecipes);
+        if (tblSnap.empty) {
+          INITIAL_TABLES.forEach(t => {
+            batch.set(
+              doc(db, 'tables', t.id),
+              sanitizeForFirestore({
+                ...t,
+                qrToken: t.qrToken || generateSecureToken(),
+                qrEnabled: true,
+              })
+            );
+          });
+          hasWrites = true;
+        }
 
-    // 10. Admin-Only Collections (Strictly bypassed for Colaborador to respect ABAC)
-    if (isAdmin) {
-      // Inventory Movements
-      const movsCol = collection(db, 'inventory_movements');
-      const unsubMovs = onSnapshot(
-        movsCol,
-        snapshot => {
-          const list: InventoryMovement[] = snapshot.docs.map(d => ({
-            id: d.id,
-            ...(d.data() as Omit<InventoryMovement, 'id'>),
-          }));
-          list.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
-          setInventoryMovements(list);
-        },
-        error => handleFirestoreError(error, OperationType.GET, 'inventory_movements')
-      );
-      unsubscribers.push(unsubMovs);
+        if (hasWrites) {
+          await batch.commit();
+        }
+      } catch (err) {
+        console.warn('Seed inicial omitido o sin cambios:', err);
+      }
+    })();
+  }, [currentUser, isAdmin]);
 
-      // Purchases
-      const purCol = collection(db, 'purchases');
-      const unsubPurchases = onSnapshot(
-        purCol,
-        snapshot => {
-          const list: PurchaseRecord[] = snapshot.docs.map(d => ({
-            id: d.id,
-            ...(d.data() as Omit<PurchaseRecord, 'id'>),
-          }));
-          list.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
-          setPurchases(list);
-        },
-        error => handleFirestoreError(error, OperationType.GET, 'purchases')
-      );
-      unsubscribers.push(unsubPurchases);
+  // ------------------------------------------------------------------------
+  // SYNC SANITIZED PUBLIC MENU & AI SNAPSHOT TO SERVER
+  // ------------------------------------------------------------------------
+  useEffect(() => {
+    if (!currentUser || !isStaff || !isOnline) return;
 
-      // Operating Expenses
-      const expCol = collection(db, 'operating_expenses');
-      const unsubExpenses = onSnapshot(
-        expCol,
-        snapshot => {
-          const list: OperatingExpense[] = snapshot.docs.map(d => ({
-            id: d.id,
-            ...(d.data() as Omit<OperatingExpense, 'id'>),
-          }));
-          setExpenses(list);
-        },
-        error => handleFirestoreError(error, OperationType.GET, 'operating_expenses')
-      );
-      unsubscribers.push(unsubExpenses);
+    const timer = setTimeout(async () => {
+      try {
+        const token = await currentUser.getIdToken();
+        const tableTokens: Record<string, { tableId: string; tableName: string }> = {};
+        tables.forEach(t => {
+          if (t.active && t.qrEnabled !== false && t.qrToken) {
+            tableTokens[t.qrToken] = { tableId: t.id, tableName: t.name };
+          }
+        });
 
-      // Audit Logs
-      const auditCol = collection(db, 'audit_logs');
-      const unsubAudit = onSnapshot(
-        auditCol,
-        snapshot => {
-          const list: AuditLog[] = snapshot.docs.map(d => ({
-            id: d.id,
-            ...(d.data() as Omit<AuditLog, 'id'>),
-          }));
-          list.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
-          setAuditLogs(list);
-        },
-        error => handleFirestoreError(error, OperationType.GET, 'audit_logs')
-      );
-      unsubscribers.push(unsubAudit);
-    }
+        await fetch('/api/public/catalog-sync', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            restaurantName: restaurantConfig.restaurantName,
+            location: restaurantConfig.location,
+            phone: restaurantConfig.phone,
+            openDays: restaurantConfig.openDays,
+            openTime: restaurantConfig.openTime,
+            closeTime: restaurantConfig.closeTime,
+            breakfastStartTime: restaurantConfig.breakfastStartTime,
+            breakfastEndTime: restaurantConfig.breakfastEndTime,
+            tableServicePercent: restaurantConfig.tableServicePercent,
+            expressDeliveryFee: restaurantConfig.expressDeliveryFee,
+            expressCoverageDescription: restaurantConfig.expressCoverageDescription,
+            categories,
+            products,
+            tableTokens,
+          }),
+        });
+      } catch {
+        // Non-blocking background sync
+      }
+    }, 1200);
 
-    return () => {
-      unsubscribers.forEach(unsub => unsub());
+    return () => clearTimeout(timer);
+  }, [currentUser, isStaff, isOnline, categories, products, tables, restaurantConfig]);
+
+  // Sync admin read-only snapshot for Jarvis / AI endpoints (explicitly no cached token on server!)
+  useEffect(() => {
+    if (!currentUser || !isAdmin || !isOnline) return;
+    const timer = setTimeout(async () => {
+      try {
+        const token = await currentUser.getIdToken();
+        await fetch('/api/ai/sync-snapshot', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            inventory_items: inventory,
+            inventory_movements: inventoryMovements,
+            orders,
+            purchases,
+            operating_expenses: expenses,
+          }),
+        });
+      } catch {
+        // Non-blocking
+      }
+    }, 2500);
+    return () => clearTimeout(timer);
+  }, [currentUser, isAdmin, isOnline, inventory, inventoryMovements, orders, purchases, expenses]);
+
+  // Poll pending public QR / Exprés orders for Reception authorization
+  useEffect(() => {
+    if (!currentUser || !isStaff || !isOnline) return;
+    let active = true;
+
+    const pollPublic = async () => {
+      try {
+        const token = await currentUser.getIdToken();
+        const res = await fetch('/api/public/pending-orders', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok || !active) return;
+        const data = await res.json();
+        if (data.success && Array.isArray(data.orders)) {
+          setPendingPublicOrders(data.orders);
+        }
+      } catch {
+        // Silent retry next interval
+      }
     };
-  }, [currentUser, isAdmin, todayCR]);
 
-  // --------------------------------------------------------------------------
-  // OFFLINE QUEUE & AUTO-SYNC LISTENER
-  // --------------------------------------------------------------------------
+    pollPublic();
+    const interval = setInterval(pollPublic, 15000);
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [currentUser, isStaff, isOnline]);
+
+  // ------------------------------------------------------------------------
+  // OFFLINE QUEUE SYNCHRONIZATION
+  // ------------------------------------------------------------------------
+  const syncOfflineQueue = useCallback(async () => {
+    if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+    if (!currentUser || isCocina) return;
+
+    const [queuedOrders, queuedMutations] = await Promise.all([
+      getOfflineOrders(),
+      getOfflineMutations(),
+    ]);
+
+    for (const qOrder of queuedOrders) {
+      try {
+        const { _offlineSyncPending, _offlineUserId, _offlineDeviceId, _offlineSavedAt, ...clean } =
+          qOrder as any;
+        await setDoc(doc(db, 'orders', clean.id), sanitizeForFirestore(clean), { merge: true });
+        await removeOfflineOrder(clean.id);
+      } catch (err) {
+        console.warn('Error sincronizando orden offline:', err);
+      }
+    }
+
+    for (const mut of queuedMutations) {
+      try {
+        if (mut.status === 'conflict') continue;
+        await updateOfflineMutationStatus(mut.id, 'syncing');
+        if (mut.type === 'set') {
+          await setDoc(doc(db, mut.collection, mut.docId), sanitizeForFirestore(mut.payload), {
+            merge: true,
+          });
+          await removeOfflineMutation(mut.id);
+        } else if (mut.type === 'update') {
+          await updateDoc(doc(db, mut.collection, mut.docId), sanitizeForFirestore(mut.payload));
+          await removeOfflineMutation(mut.id);
+        } else if (mut.type === 'payment_transaction') {
+          const payload = mut.payload as {
+            orderId: string;
+            registerId?: string;
+            payments: PaymentRecord[];
+            finalPaymentMethod?: PaymentMethod;
+          };
+          const targetRegisterId =
+            payload.registerId || payload.payments?.[0]?.registerId || activeCashRegister?.id;
+          if (!payload.orderId || !targetRegisterId || !Array.isArray(payload.payments) || payload.payments.length === 0) {
+            await updateOfflineMutationStatus(mut.id, 'conflict', 'Datos de pago offline incompletos para conciliación.');
+            continue;
+          }
+
+          await runTransaction(db, async tx => {
+            const orderRef = doc(db, 'orders', payload.orderId);
+            const regRef = doc(db, 'cash_registers', targetRegisterId);
+            const payRefs = payload.payments.map(p => doc(db, 'payments', p.id));
+
+            const [orderSnap, regSnap, ...paySnaps] = await Promise.all([
+              tx.get(orderRef),
+              tx.get(regRef),
+              ...payRefs.map(ref => tx.get(ref)),
+            ]);
+
+            if (!orderSnap.exists()) {
+              throw new Error('CONFLICT: La orden ya no existe en Firestore.');
+            }
+            const liveOrder = orderSnap.data() as RestaurantOrder;
+            const regData = regSnap.exists() ? (regSnap.data() as CashRegister) : undefined;
+            const existingIds = new Set<string>();
+            paySnaps.forEach((snap, idx) => {
+              if (snap.exists()) existingIds.add(payload.payments[idx].id);
+            });
+
+            const evalRes = evaluateTransactionalPayment({
+              liveOrder,
+              registerStatus: regData?.status,
+              existingPaymentIds: existingIds,
+              incomingPayments: payload.payments,
+            });
+
+            if (!evalRes.ok) {
+              throw new Error(`CONFLICT: ${evalRes.error}`);
+            }
+            if (evalRes.idempotentReplay || !regData) {
+              return;
+            }
+
+            const nowIso = new Date().toISOString();
+            for (const pay of evalRes.paymentsToWrite) {
+              tx.set(doc(db, 'payments', pay.id), sanitizeForFirestore(pay));
+              const movId = `cm_sale_${pay.id}`;
+              tx.set(
+                doc(db, 'cash_movements', movId),
+                sanitizeForFirestore({
+                  id: movId,
+                  registerId: targetRegisterId,
+                  type: 'sale',
+                  amount: pay.amount,
+                  paymentMethod: pay.method,
+                  referenceId: payload.orderId,
+                  description: `Cobro offline sincronizado ${liveOrder.orderNumber} (${pay.method.toUpperCase()})`,
+                  performedBy: pay.performedBy || getActorName(),
+                  createdAt: pay.createdAt || nowIso,
+                })
+              );
+            }
+
+            const nextReg: CashRegister = {
+              ...regData,
+              cashSales: (regData.cashSales || 0) + evalRes.addCash,
+              sinpeSales: (regData.sinpeSales || 0) + evalRes.addSinpe,
+              cardSales: (regData.cardSales || 0) + evalRes.addCard,
+            };
+            tx.update(regRef, {
+              cashSales: nextReg.cashSales,
+              sinpeSales: nextReg.sinpeSales,
+              cardSales: nextReg.cardSales,
+              expectedCash: calculateExpectedCash(nextReg),
+            });
+
+            const currentOp = resolveOperationalStatus(liveOrder);
+            tx.set(
+              orderRef,
+              sanitizeForFirestore({
+                ...liveOrder,
+                paidAmount: evalRes.nextPaidTotal,
+                financialStatus: evalRes.nextFinStatus,
+                paymentStatus: evalRes.nextFinStatus,
+                paymentMethod: payload.finalPaymentMethod || liveOrder.paymentMethod || payload.payments[0].method,
+                paidAt: evalRes.isNowFullyPaid ? nowIso : liveOrder.paidAt,
+                status: toLegacyOrderStatus(currentOp, evalRes.nextFinStatus),
+                updatedAt: nowIso,
+              }),
+              { merge: true }
+            );
+          });
+
+          await removeOfflineMutation(mut.id);
+        } else {
+          await updateOfflineMutationStatus(mut.id, 'conflict', `Tipo de mutación no reconocido: ${mut.type}`);
+        }
+      } catch (err: any) {
+        const msg = err?.message || 'Error de sincronización';
+        const nextStatus = msg.startsWith('CONFLICT:') ? 'conflict' : 'failed';
+        await updateOfflineMutationStatus(mut.id, nextStatus, msg);
+      }
+    }
+
+    const remaining = await getOfflinePendingCount();
+    setPendingOfflineCount(remaining);
+  }, [currentUser, isCocina, activeCashRegister?.id, getActorName]);
+
   useEffect(() => {
     const handleOnline = () => {
       setIsOnline(true);
@@ -494,1755 +1009,2295 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
-
-    getOfflinePendingCount().then(setPendingOfflineCount);
+    getOfflinePendingCount().then(setPendingOfflineCount).catch(() => {});
 
     return () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
-  }, []);
+  }, [syncOfflineQueue]);
 
-  // Sync live snapshot to backend for Jarvis AI read-only endpoints when Admin is active
-  useEffect(() => {
-    if (!currentUser || !isAdmin || !isOnline) return;
-    const timer = setTimeout(async () => {
-      try {
-        const idToken = await currentUser.getIdToken();
-        await fetch('/api/ai/sync-snapshot', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${idToken}`,
-          },
-          body: JSON.stringify({
-            inventory_items: inventory,
-            orders,
-            purchases,
-            operating_expenses: expenses,
-          }),
-        });
-      } catch {
-        // Ignore background sync warnings
-      }
-    }, 1500);
-    return () => clearTimeout(timer);
-  }, [currentUser, isAdmin, isOnline, inventory, orders, purchases, expenses]);
-
-  const syncOfflineQueue = async () => {
-    const pendingOrders = await getOfflineOrders();
-    const pendingMutations = await getOfflineMutations();
-
-    // 1. Sync pending orders (including full payment + cash register + inventory deduction if paid offline)
-    for (const order of pendingOrders) {
-      try {
-        if (order.paymentStatus === 'paid' && !order.inventoryDeducted) {
-          // First persist order as unpaid so completeOrderPayment can process it atomically without skipping
-          const unpaidCopy: RestaurantOrder = sanitizeForFirestore({
-            ...order,
-            paymentStatus: 'unpaid',
-            status: 'served',
-            inventoryDeducted: false,
-          });
-          await setDoc(doc(db, 'orders', order.id), unpaidCopy);
-          const payRes = await completeOrderPayment(order.id, order.paymentMethod || 'efectivo');
-          if (payRes.success || payRes.error?.includes('ya fue')) {
-            await removeOfflineOrder(order.id);
-          }
-        } else {
-          await setDoc(doc(db, 'orders', order.id), sanitizeForFirestore(order));
-          await removeOfflineOrder(order.id);
-        }
-      } catch (err) {
-        console.warn('Error sincronizando orden pendiente:', order.id, err);
-      }
-    }
-
-    // 2. Sync pending mutations
-    for (const mutation of pendingMutations) {
-      try {
-        if (mutation.type === 'set') {
-          await setDoc(doc(db, mutation.collection, mutation.docId), sanitizeForFirestore(mutation.payload));
-        } else if (mutation.type === 'update') {
-          await updateDoc(doc(db, mutation.collection, mutation.docId), sanitizeForFirestore(mutation.payload));
-        }
-        await removeOfflineMutation(mutation.id);
-      } catch (err) {
-        console.warn('Error sincronizando mutación pendiente:', mutation.id, err);
-      }
-    }
-
-    const remaining = await getOfflinePendingCount();
-    setPendingOfflineCount(remaining);
-  };
-
-  const addAuditLog = async (
-    action: string,
-    collectionName: string,
-    documentId: string,
-    reason: string,
-    details?: string
-  ) => {
-    const newLog: AuditLog = {
-      id: `audit_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-      action,
-      collection: collectionName,
-      documentId,
-      reason,
-      performedBy: appUser?.displayName || currentUser?.email || 'Usuario',
-      performedByUid: currentUser?.uid || '',
-      performedByEmail: currentUser?.email || appUser?.email || '',
-      timestamp: new Date().toISOString(),
-      details,
+  // ------------------------------------------------------------------------
+  // RESTAURANT CONFIG & CATALOG IMPORT
+  // ------------------------------------------------------------------------
+  const updateRestaurantConfig = async (patch: Partial<RestaurantConfig>) => {
+    if (!isAdmin) throw new Error('Solo el administrador puede modificar la configuración.');
+    const next: RestaurantConfig = {
+      ...restaurantConfig,
+      ...patch,
+      updatedAt: new Date().toISOString(),
+      updatedBy: getActorName(),
     };
-
-    try {
-      await setDoc(doc(db, 'audit_logs', newLog.id), newLog);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, 'audit_logs');
-    }
+    await setDoc(doc(db, 'restaurant_config', 'main'), sanitizeForFirestore(next), { merge: true });
+    setRestaurantConfig(next);
+    await addAuditLog('update_config', 'restaurant_config', 'main', 'Actualización de configuración operativa');
   };
 
-  // --------------------------------------------------------------------------
-  // TABLE MANAGEMENT
-  // --------------------------------------------------------------------------
-  const selectTable = (table: RestaurantTable | null) => {
-    setSelectedTable(table);
-    if (!table) {
-      setCurrentOrder(null);
-      return;
-    }
+  const importPollosKarenOfficialMenu = async (options?: { updateExistingPrices?: boolean }) => {
+    if (!isAdmin) throw new Error('Solo el administrador puede importar el catálogo oficial.');
+    const batch = writeBatch(db);
+    let categoriesAdded = 0;
+    let productsAdded = 0;
+    let productsUpdated = 0;
 
-    // 1. Check if table has a linked currentOrderId
-    if (table.currentOrderId) {
-      const existing = orders.find(o => o.id === table.currentOrderId);
-      if (existing && existing.status !== 'cancelled' && existing.paymentStatus !== 'paid') {
-        setCurrentOrder(existing);
-        return;
+    const existingCatIds = new Set(categories.map(c => c.id));
+    const existingProdById = new Map(products.map(p => [p.id, p]));
+    const existingProdByName = new Map(products.map(p => [p.name.trim().toLowerCase(), p]));
+
+    for (const cat of POLLOS_KAREN_CATEGORIES) {
+      if (!existingCatIds.has(cat.id)) {
+        batch.set(doc(db, 'categories', cat.id), sanitizeForFirestore(cat));
+        categoriesAdded += 1;
       }
     }
 
-    // 2. Fallback check: find active unpaid order associated with this table
-    const activeTableOrder = orders.find(
-      o => o.tableId === table.id && o.paymentStatus !== 'paid' && o.status !== 'cancelled'
-    );
-    if (activeTableOrder) {
-      setCurrentOrder(activeTableOrder);
-      return;
+    const nowIso = new Date().toISOString();
+    for (const prod of POLLOS_KAREN_PRODUCTS) {
+      const match =
+        existingProdById.get(prod.id) || existingProdByName.get(prod.name.trim().toLowerCase());
+      if (!match) {
+        batch.set(
+          doc(db, 'products', prod.id),
+          sanitizeForFirestore({ ...prod, updatedAt: nowIso })
+        );
+        productsAdded += 1;
+      } else if (options?.updateExistingPrices && match.price !== prod.price) {
+        batch.update(
+          doc(db, 'products', match.id),
+          sanitizeForFirestore({
+            price: prod.price,
+            description: prod.description || match.description,
+            breakfastOnly: prod.breakfastOnly,
+            dayOfWeek: prod.dayOfWeek,
+            updatedAt: nowIso,
+          })
+        );
+        productsUpdated += 1;
+      }
     }
 
-    // 3. Otherwise create a clean new order for this table
-    const newOrder = createNewOrder('mesa', table);
-    setCurrentOrder(newOrder);
+    if (categoriesAdded > 0 || productsAdded > 0 || productsUpdated > 0) {
+      await batch.commit();
+      await addAuditLog(
+        'save_product',
+        'products',
+        POLLOS_KAREN_PRODUCTS[0].id,
+        'Importación revisada de catálogo oficial Pollos Karen',
+        `Categorías nuevas: ${categoriesAdded}, Productos nuevos: ${productsAdded}, Precios actualizados: ${productsUpdated}`
+      );
+    }
+
+    return { categoriesAdded, productsAdded, productsUpdated };
   };
+
+  // ------------------------------------------------------------------------
+  // TABLES & QR MANAGEMENT
+  // ------------------------------------------------------------------------
+  const selectTable = (table: RestaurantTable | null) => setSelectedTable(table);
 
   const updateTableStatus = async (
     tableId: string,
     status: RestaurantTable['status'],
     currentOrderId?: string | null
   ) => {
-    const payload: Partial<RestaurantTable> = {
+    const payload: Record<string, any> = {
       status,
-      currentOrderId: currentOrderId !== undefined ? currentOrderId : null,
       updatedAt: new Date().toISOString(),
     };
-
-    try {
-      await updateDoc(doc(db, 'tables', tableId), payload);
-    } catch (error) {
-      if (!isOnline) {
-        await saveOfflineMutation({
-          id: `mut_tbl_${tableId}_${Date.now()}`,
-          collection: 'tables',
-          docId: tableId,
-          type: 'update',
-          payload,
-          createdAt: new Date().toISOString(),
-        });
-      } else {
-        handleFirestoreError(error, OperationType.UPDATE, `tables/${tableId}`);
-      }
+    if (currentOrderId !== undefined) {
+      payload.currentOrderId = currentOrderId || null;
     }
+    await updateDoc(doc(db, 'tables', tableId), sanitizeForFirestore(payload));
   };
 
-  const addTable = async (name: string, number: number, type: 'table' | 'bar', seats: number) => {
-    if (!isAdmin) return;
+  const addTable = async (
+    name: string,
+    number: number,
+    type: 'table' | 'bar',
+    seats: number
+  ) => {
+    if (!isAdmin) throw new Error('Solo el administrador puede agregar mesas.');
+    const id = `${type === 'bar' ? 'barra' : 'mesa'}-${number}-${Date.now().toString(36).slice(-3)}`;
     const newTable: RestaurantTable = {
-      id: `table-${Date.now()}`,
-      name,
+      id,
+      name: name.trim(),
       number,
       type,
+      seats,
       active: true,
       status: 'libre',
-      seats,
+      qrToken: generateSecureToken(),
+      qrEnabled: true,
       updatedAt: new Date().toISOString(),
     };
-
-    try {
-      await setDoc(doc(db, 'tables', newTable.id), newTable);
-      await addAuditLog('create', 'tables', newTable.id, 'Creación de mesa/barra', `Nombre: ${name}`);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, 'tables');
-    }
+    await setDoc(doc(db, 'tables', id), sanitizeForFirestore(newTable));
+    await addAuditLog('create', 'tables', id, `Creación de mesa/barra: ${name}`);
   };
 
   const toggleTableActive = async (tableId: string) => {
-    if (!isAdmin) return;
-    const current = tables.find(t => t.id === tableId);
-    if (!current) return;
-
-    try {
-      await updateDoc(doc(db, 'tables', tableId), {
-        active: !current.active,
-        updatedAt: new Date().toISOString(),
-      });
-      await addAuditLog('toggle_active', 'tables', tableId, 'Cambio de activación de mesa');
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `tables/${tableId}`);
-    }
+    if (!isAdmin) throw new Error('Solo el administrador puede habilitar o deshabilitar mesas.');
+    const tbl = tables.find(t => t.id === tableId);
+    if (!tbl) return;
+    await updateDoc(doc(db, 'tables', tableId), {
+      active: !tbl.active,
+      updatedAt: new Date().toISOString(),
+    });
+    await addAuditLog('toggle_active', 'tables', tableId, `Mesa ${tbl.name} -> ${!tbl.active ? 'Activa' : 'Inactiva'}`);
   };
 
-  // --------------------------------------------------------------------------
-  // ORDER MANAGEMENT
-  // --------------------------------------------------------------------------
-  const createNewOrder = (serviceType: ServiceType, table?: RestaurantTable): RestaurantOrder => {
-    const dateStr = getCostaRicaDateString();
-    const prefix = serviceType === 'mesa' ? 'M' : serviceType === 'ventana' ? 'V' : 'E';
+  const rotateTableQRToken = async (tableId: string): Promise<string> => {
+    if (!isAdmin) throw new Error('Solo el administrador puede rotar códigos QR.');
+    const newToken = generateSecureToken();
+    await updateDoc(doc(db, 'tables', tableId), {
+      qrToken: newToken,
+      qrEnabled: true,
+      updatedAt: new Date().toISOString(),
+    });
+    await addAuditLog('rotate_qr', 'tables', tableId, 'Rotación de token QR de mesa');
+    return newToken;
+  };
 
-    const resolvedTable =
-      serviceType === 'mesa'
-        ? table || selectedTable || tables.find(t => t.active && t.status === 'libre') || tables.find(t => t.active) || tables[0]
-        : undefined;
+  const toggleTableQR = async (tableId: string, enabled: boolean) => {
+    if (!isAdmin) throw new Error('Solo el administrador puede cambiar estado del QR.');
+    await updateDoc(doc(db, 'tables', tableId), {
+      qrEnabled: enabled,
+      updatedAt: new Date().toISOString(),
+    });
+    await addAuditLog('rotate_qr', 'tables', tableId, `QR de mesa ${enabled ? 'habilitado' : 'deshabilitado'}`);
+  };
 
-    // Find highest existing sequence number for this prefix today to prevent multi-device duplicates
-    const existingSeqNumbers = orders
-      .filter(o => o.operationalDate === dateStr && o.orderNumber?.startsWith(`${prefix}-`))
-      .map(o => {
-        const numPart = parseInt(o.orderNumber.replace(`${prefix}-`, ''), 10);
-        return isNaN(numPart) ? 0 : numPart;
-      });
-    const maxSeq = existingSeqNumbers.length > 0 ? Math.max(...existingSeqNumbers) : 0;
-    const orderNumber = generateOrderNumber(serviceType, maxSeq + 1);
+  // ------------------------------------------------------------------------
+  // DELTA INVENTORY DEDUCTION (RESPECTS yieldPortions + convertToInventoryUnit)
+  // ------------------------------------------------------------------------
+  const deductInventoryDeltaForOrder = async (
+    order: RestaurantOrder
+  ): Promise<OrderLineItem[]> => {
     const nowIso = new Date().toISOString();
+    const updatedItems: OrderLineItem[] = [];
+    const consumptionDeltas = new Map<
+      string,
+      { itemId: string; itemName: string; deltaQty: number; unit: string }
+    >();
 
-    const newOrder: RestaurantOrder = {
-      id: `ord_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-      orderNumber,
-      serviceType,
-      ...(resolvedTable ? { tableId: resolvedTable.id, tableName: resolvedTable.name } : {}),
-      items: [],
-      status: 'pending',
-      paymentStatus: 'unpaid',
-      subtotal: 0,
-      serviceCharge: 0,
-      total: 0,
-      operationalDate: dateStr,
-      createdBy: appUser?.displayName || 'Colaborador',
-      createdAt: nowIso,
-      updatedAt: nowIso,
-      changeHistory: [
-        {
-          timestamp: nowIso,
-          user: appUser?.displayName || 'Colaborador',
-          action: 'Creación de comanda',
-          details: `Servicio: ${serviceType.toUpperCase()}${resolvedTable ? ` (${resolvedTable.name})` : ''}`,
-        },
-      ],
-    };
+    for (const item of order.items) {
+      const alreadyDeducted = Number(item.deductedQuantity || 0);
+      const pendingQty = item.quantity - alreadyDeducted;
+      let historicalUnitCost = item.historicalUnitCost;
 
-    return sanitizeForFirestore(newOrder);
-  };
+      if (pendingQty > 0) {
+        // Match admin Recipe (with cost) OR zero-cost RecipeFormula (for Colaborador)
+        const adminRecipe = isAdmin
+          ? recipes.find(
+              r =>
+                r.productId === item.productId &&
+                (!r.protein || r.protein === item.selectedProtein)
+            )
+          : undefined;
 
-  const addItemToCurrentOrder = (product: ProductItem, protein?: CasadoProtein, notes?: string) => {
-    if (product.isCasado && !protein) {
-      return;
-    }
+        const formula = !adminRecipe
+          ? recipeFormulas.find(
+              f =>
+                f.productId === item.productId &&
+                (!f.protein || f.protein === item.selectedProtein)
+            )
+          : undefined;
 
-    const cleanNotes = notes?.trim() || undefined;
-
-    setCurrentOrder(prevOrder => {
-      let baseOrder = prevOrder;
-      if (!baseOrder) {
-        const defaultTable =
-          selectedTable ||
-          tables.find(t => t.active && t.status === 'libre') ||
-          tables.find(t => t.active) ||
-          tables[0];
-        if (!selectedTable && defaultTable) {
-          setSelectedTable(defaultTable);
+        if (adminRecipe && adminRecipe.autoDeductEnabled) {
+          historicalUnitCost = adminRecipe.calculatedCost;
+          for (const ing of adminRecipe.ingredients) {
+            const invItem = inventory.find(i => i.id === ing.itemId);
+            if (!invItem) continue;
+            const calc = calculateIngredientConsumption(
+              pendingQty,
+              adminRecipe.yieldPortions || 1,
+              ing.quantity,
+              ing.unit,
+              invItem.unit
+            );
+            if (!calc.compatible || calc.deductedQty <= 0) continue;
+            const cur = consumptionDeltas.get(invItem.id) || {
+              itemId: invItem.id,
+              itemName: invItem.name,
+              deltaQty: 0,
+              unit: invItem.unit,
+            };
+            cur.deltaQty = Math.round((cur.deltaQty + calc.deductedQty) * 10000) / 10000;
+            consumptionDeltas.set(invItem.id, cur);
+          }
+        } else if (formula && formula.autoDeductEnabled) {
+          for (const ing of formula.ingredients) {
+            const calc = calculateIngredientConsumption(
+              pendingQty,
+              formula.yieldPortions || 1,
+              ing.quantity,
+              normalizeUnitString(ing.unit),
+              normalizeUnitString(ing.inventoryUnit)
+            );
+            if (!calc.compatible || calc.deductedQty <= 0) continue;
+            const cur = consumptionDeltas.get(ing.itemId) || {
+              itemId: ing.itemId,
+              itemName: ing.itemName,
+              deltaQty: 0,
+              unit: ing.inventoryUnit,
+            };
+            cur.deltaQty = Math.round((cur.deltaQty + calc.deductedQty) * 10000) / 10000;
+            consumptionDeltas.set(ing.itemId, cur);
+          }
         }
-        baseOrder = createNewOrder(defaultTable ? 'mesa' : 'ventana', defaultTable);
       }
 
-      const existingIndex = baseOrder.items.findIndex(
-        item =>
-          item.productId === product.id &&
-          (item.selectedProtein || undefined) === (protein || undefined) &&
-          (item.notes || '') === (cleanNotes || '')
+      updatedItems.push({
+        ...item,
+        deductedQuantity: Math.max(alreadyDeducted, item.quantity),
+        historicalUnitCost,
+      });
+    }
+
+    if (consumptionDeltas.size > 0 && isOnline) {
+      const batch = writeBatch(db);
+      for (const delta of consumptionDeltas.values()) {
+        batch.update(doc(db, 'inventory_items', delta.itemId), {
+          currentStock: increment(-delta.deltaQty),
+          updatedAt: nowIso,
+        });
+        const invItem = isAdmin ? inventory.find(i => i.id === delta.itemId) : undefined;
+        const prevStock = invItem ? Number(invItem.currentStock) : 0;
+        const movId = `inv_cons_${order.id}_${delta.itemId}_${Date.now().toString(36)}`;
+        batch.set(
+          doc(db, 'inventory_movements', movId),
+          sanitizeForFirestore({
+            id: movId,
+            itemId: delta.itemId,
+            itemName: delta.itemName,
+            type: 'consumption',
+            quantity: delta.deltaQty,
+            previousStock: prevStock,
+            newStock: isAdmin ? Math.round((prevStock - delta.deltaQty) * 1000) / 1000 : 0,
+            reason: `Consumo automático orden ${order.orderNumber}`,
+            referenceId: order.id,
+            performedBy: getActorName(),
+            createdAt: nowIso,
+          })
+        );
+      }
+      try {
+        await batch.commit();
+      } catch (err) {
+        console.warn('Error aplicando descuento de inventario delta:', err);
+      }
+    }
+
+    return updatedItems;
+  };
+
+  // ------------------------------------------------------------------------
+  // ORDER CREATION & LOCAL DRAFT EDITING
+  // ------------------------------------------------------------------------
+  const recalculateDraft = useCallback(
+    (order: RestaurantOrder): RestaurantOrder => {
+      const totals = calculateOrderTotalsDetailed(order.items, order.serviceType, {
+        tableServicePercent: restaurantConfig.tableServicePercent,
+        expressDeliveryFee:
+          order.serviceType === 'expres'
+            ? order.deliveryDetails?.deliveryFee ?? restaurantConfig.expressDeliveryFee
+            : 0,
+        discount: order.discount || 0,
+      });
+      return {
+        ...order,
+        subtotal: totals.subtotal,
+        serviceCharge: totals.serviceCharge,
+        deliveryFee: totals.deliveryFee,
+        discount: totals.discount,
+        total: totals.total,
+        updatedAt: new Date().toISOString(),
+      };
+    },
+    [restaurantConfig]
+  );
+
+  const createNewOrder = (serviceType: ServiceType, table?: RestaurantTable): RestaurantOrder => {
+    const nowIso = new Date().toISOString();
+    const newOrd: RestaurantOrder = recalculateDraft({
+      id: `ord_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      orderNumber: generateOrderNumber(serviceType, orders.length + 1),
+      serviceType,
+      tableId: table?.id,
+      tableName: table?.name,
+      items: [],
+      status: 'pending',
+      operationalStatus: 'pending_auth',
+      financialStatus: 'unpaid',
+      paymentStatus: 'unpaid',
+      paidAmount: 0,
+      subtotal: 0,
+      serviceCharge: 0,
+      deliveryFee: serviceType === 'expres' ? restaurantConfig.expressDeliveryFee : 0,
+      discount: 0,
+      total: 0,
+      operationalDate: getCostaRicaDateString(),
+      source: 'pos',
+      createdBy: getActorName(),
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+    setCurrentOrder(newOrd);
+    return newOrd;
+  };
+
+  const addItemToCurrentOrder = (
+    product: ProductItem,
+    protein?: CasadoProtein,
+    notes?: string
+  ) => {
+    setCurrentOrder(prev => {
+      if (!prev) return prev;
+      const cleanNotes = notes?.trim() || undefined;
+      const existingIdx = prev.items.findIndex(
+        it =>
+          it.productId === product.id &&
+          it.selectedProtein === protein &&
+          (it.notes || '') === (cleanNotes || '')
       );
 
-      let updatedItems: OrderLineItem[];
-
-      if (existingIndex >= 0) {
-        updatedItems = baseOrder.items.map((item, idx) => {
-          if (idx === existingIndex) {
-            const newQty = item.quantity + 1;
-            return {
-              ...item,
-              quantity: newQty,
-              subtotal: newQty * item.price,
-            };
-          }
-          return item;
-        });
+      let nextItems: OrderLineItem[];
+      if (existingIdx >= 0) {
+        nextItems = prev.items.map((it, idx) =>
+          idx === existingIdx
+            ? {
+                ...it,
+                quantity: it.quantity + 1,
+                subtotal: (it.quantity + 1) * it.price,
+              }
+            : it
+        );
       } else {
-        const newItem: OrderLineItem = {
-          id: `item_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
+        const line: OrderLineItem = {
+          id: `line_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
           productId: product.id,
           name: product.name,
           price: product.price,
           quantity: 1,
-          isCasado: Boolean(product.isCasado),
-          ...(protein ? { selectedProtein: protein } : {}),
-          ...(cleanNotes ? { notes: cleanNotes } : {}),
+          isCasado: Boolean(product.isCasado || protein),
+          selectedProtein: protein,
+          notes: cleanNotes,
           subtotal: product.price,
+          deductedQuantity: 0,
         };
-        updatedItems = [...baseOrder.items, newItem];
+        nextItems = [...prev.items, line];
       }
 
-      const { subtotal, serviceCharge, total } = calculateOrderTotals(updatedItems, baseOrder.serviceType);
-
-      return sanitizeForFirestore({
-        ...baseOrder,
-        items: updatedItems,
-        subtotal,
-        serviceCharge,
-        total,
-        updatedAt: new Date().toISOString(),
-      });
+      return recalculateDraft({ ...prev, items: nextItems });
     });
   };
 
   const updateOrderItemQuantity = (lineItemId: string, delta: number) => {
-    setCurrentOrder(prevOrder => {
-      if (!prevOrder) return prevOrder;
-
-      const updatedItems = prevOrder.items
-        .map(item => {
-          if (item.id === lineItemId) {
-            const newQty = item.quantity + delta;
-            if (newQty <= 0) return null;
-            return {
-              ...item,
-              quantity: newQty,
-              subtotal: newQty * item.price,
-            };
-          }
-          return item;
+    setCurrentOrder(prev => {
+      if (!prev) return prev;
+      const nextItems = prev.items
+        .map(it => {
+          if (it.id !== lineItemId) return it;
+          const nextQty = it.quantity + delta;
+          if (nextQty <= 0) return null;
+          return { ...it, quantity: nextQty, subtotal: nextQty * it.price };
         })
         .filter(Boolean) as OrderLineItem[];
-
-      const { subtotal, serviceCharge, total } = calculateOrderTotals(updatedItems, prevOrder.serviceType);
-
-      return sanitizeForFirestore({
-        ...prevOrder,
-        items: updatedItems,
-        subtotal,
-        serviceCharge,
-        total,
-        updatedAt: new Date().toISOString(),
-      });
+      return recalculateDraft({ ...prev, items: nextItems });
     });
   };
 
   const removeOrderItem = (lineItemId: string) => {
-    setCurrentOrder(prevOrder => {
-      if (!prevOrder) return prevOrder;
-
-      const updatedItems = prevOrder.items.filter(item => item.id !== lineItemId);
-      const { subtotal, serviceCharge, total } = calculateOrderTotals(updatedItems, prevOrder.serviceType);
-
-      return sanitizeForFirestore({
-        ...prevOrder,
-        items: updatedItems,
-        subtotal,
-        serviceCharge,
-        total,
-        updatedAt: new Date().toISOString(),
-      });
+    setCurrentOrder(prev => {
+      if (!prev) return prev;
+      const nextItems = prev.items.filter(it => it.id !== lineItemId);
+      return recalculateDraft({ ...prev, items: nextItems });
     });
   };
 
   const setOrderObservations = (observations: string) => {
-    setCurrentOrder(prevOrder => {
-      if (!prevOrder) return prevOrder;
-      return sanitizeForFirestore({
-        ...prevOrder,
-        observations,
-        updatedAt: new Date().toISOString(),
+    setCurrentOrder(prev => (prev ? { ...prev, observations } : prev));
+  };
+
+  const setOrderDeliveryDetails = (details: DeliveryDetails | undefined) => {
+    setCurrentOrder(prev => {
+      if (!prev) return prev;
+      return recalculateDraft({ ...prev, deliveryDetails: details });
+    });
+  };
+
+  const setOrderDiscount = (discount: number, reason?: string) => {
+    setCurrentOrder(prev => {
+      if (!prev) return prev;
+      const safeDiscount = Math.max(0, Number(discount) || 0);
+      return recalculateDraft({
+        ...prev,
+        discount: safeDiscount,
+        discountReason: reason?.trim() || prev.discountReason,
       });
     });
   };
 
-  const saveActiveOrder = async (): Promise<{ success: boolean; order?: RestaurantOrder; error?: string }> => {
-    if (!currentOrder || currentOrder.items.length === 0) {
-      return { success: false, error: 'Agregue al menos un producto antes de guardar la comanda.' };
+  // ------------------------------------------------------------------------
+  // SAVE ORDER & AUTHORIZE TO KITCHEN (KDS)
+  // ------------------------------------------------------------------------
+  const saveActiveOrder = async (options?: {
+    authorizeToKitchen?: boolean;
+  }): Promise<{ success: boolean; order?: RestaurantOrder; error?: string }> => {
+    if (!currentOrder) return { success: false, error: 'No hay una orden activa.' };
+    if (currentOrder.items.length === 0) {
+      return { success: false, error: 'Debe agregar al menos un producto a la orden.' };
     }
 
-    const nowIso = new Date().toISOString();
-
-    // Ensure mesa orders always have a valid table assigned
-    let resolvedTableId = currentOrder.tableId;
-    let resolvedTableName = currentOrder.tableName;
-    if (currentOrder.serviceType === 'mesa' && !resolvedTableId) {
-      const fallbackTable =
-        selectedTable ||
-        tables.find(t => t.active && t.status === 'libre') ||
-        tables.find(t => t.active) ||
-        tables[0];
-      if (fallbackTable) {
-        resolvedTableId = fallbackTable.id;
-        resolvedTableName = fallbackTable.name;
-        if (!selectedTable) {
-          setSelectedTable(fallbackTable);
-        }
+    if (currentOrder.serviceType === 'expres' && currentOrder.deliveryDetails) {
+      if (!currentOrder.deliveryDetails.withinCoverageRadius) {
+        return {
+          success: false,
+          error: 'El pedido exprés requiere confirmación de cobertura dentro del radio de 1 km en La Uruca.',
+        };
       }
     }
 
-    // Detect collision on orderNumber
-    let finalOrderNumber = currentOrder.orderNumber;
-    const hasCollision = orders.some(
-      o =>
-        o.id !== currentOrder.id &&
-        o.operationalDate === currentOrder.operationalDate &&
-        o.orderNumber === finalOrderNumber
-    );
+    const authorizeNow = options?.authorizeToKitchen ?? true;
+    const nowIso = new Date().toISOString();
+    const existingOrder = orders.find(o => o.id === currentOrder.id);
+    const currentOpStatus = resolveOperationalStatus(currentOrder);
+    const nextOpStatus: OperationalOrderStatus =
+      authorizeNow && currentOpStatus === 'pending_auth' ? 'authorized' : currentOpStatus;
 
-    if (hasCollision) {
-      const prefix = currentOrder.serviceType === 'mesa' ? 'M' : currentOrder.serviceType === 'ventana' ? 'V' : 'E';
-      const existingSeqNumbers = orders
-        .filter(o => o.operationalDate === currentOrder.operationalDate && o.orderNumber?.startsWith(`${prefix}-`))
-        .map(o => {
-          const numPart = parseInt(o.orderNumber.replace(`${prefix}-`, ''), 10);
-          return isNaN(numPart) ? 0 : numPart;
-        });
-      const maxSeq = existingSeqNumbers.length > 0 ? Math.max(...existingSeqNumbers) : 0;
-      finalOrderNumber = generateOrderNumber(currentOrder.serviceType, maxSeq + 1);
-    }
-
-    const orderToSave: RestaurantOrder = sanitizeForFirestore({
+    let orderToSave: RestaurantOrder = recalculateDraft({
       ...currentOrder,
-      orderNumber: finalOrderNumber,
-      ...(resolvedTableId ? { tableId: resolvedTableId, tableName: resolvedTableName } : {}),
-      status: currentOrder.status === 'pending' ? 'in_kitchen' : currentOrder.status,
+      operationalStatus: nextOpStatus,
+      financialStatus: resolveFinancialStatus(currentOrder),
+      status: toLegacyOrderStatus(nextOpStatus, resolveFinancialStatus(currentOrder)),
+      authorizedAt:
+        nextOpStatus === 'authorized' && !currentOrder.authorizedAt
+          ? nowIso
+          : currentOrder.authorizedAt,
       updatedAt: nowIso,
       changeHistory: [
         ...(currentOrder.changeHistory || []),
         {
           timestamp: nowIso,
-          user: appUser?.displayName || 'Colaborador',
-          action: currentOrder.status === 'pending' ? 'Envío a cocina' : 'Actualización de comanda',
-          details: `${currentOrder.items.length} productos - Total: ₡${currentOrder.total}`,
+          user: getActorName(),
+          action: existingOrder ? 'Orden actualizada' : 'Orden creada y enviada',
         },
       ],
     });
 
-    try {
-      if (isOnline) {
-        await runTransaction(db, async transaction => {
-          // --- PHASE 1: ALL TRANSACTIONAL READS FIRST ---
-          const orderRef = doc(db, 'orders', orderToSave.id);
-          let tableRef: any = null;
-          let tableSnap: any = null;
-          let conflictOrderSnap: any = null;
+    // Trigger delta inventory deduction if configured for kitchen authorization
+    if (
+      authorizeNow &&
+      restaurantConfig.inventoryDeductionTrigger === 'kitchen_auth' &&
+      isOnline
+    ) {
+      const updatedItems = await deductInventoryDeltaForOrder(orderToSave);
+      orderToSave = {
+        ...orderToSave,
+        items: updatedItems,
+        inventoryDeducted: true,
+        inventoryDeductedAt: nowIso,
+      };
+    }
 
-          if (orderToSave.tableId) {
-            tableRef = doc(db, 'tables', orderToSave.tableId);
-            tableSnap = await transaction.get(tableRef);
-            if (tableSnap.exists()) {
-              const tData = tableSnap.data() as RestaurantTable;
-              if (
-                tData.status === 'activa' &&
-                tData.currentOrderId &&
-                tData.currentOrderId !== orderToSave.id
-              ) {
-                const conflictOrderRef = doc(db, 'orders', tData.currentOrderId);
-                conflictOrderSnap = await transaction.get(conflictOrderRef);
-              }
-            }
-          }
-
-          // --- PHASE 2: VALIDATION & ALL TRANSACTIONAL WRITES ---
-          if (orderToSave.tableId && tableRef) {
-            if (tableSnap && tableSnap.exists()) {
-              const tData = tableSnap.data() as RestaurantTable;
-              if (
-                tData.status === 'activa' &&
-                tData.currentOrderId &&
-                tData.currentOrderId !== orderToSave.id &&
-                conflictOrderSnap &&
-                conflictOrderSnap.exists()
-              ) {
-                const cOrd = conflictOrderSnap.data() as RestaurantOrder;
-                if (cOrd.status !== 'cancelled' && cOrd.paymentStatus !== 'paid') {
-                  throw new Error(
-                    `Conflicto en salón: La mesa ${tData.name} ya tiene una comanda activa (${cOrd.orderNumber}) en otro terminal.`
-                  );
-                }
-              }
-
-              transaction.update(tableRef, {
-                status: 'activa',
-                currentOrderId: orderToSave.id,
-                updatedAt: nowIso,
-              });
-            } else {
-              const localTable = tables.find(t => t.id === orderToSave.tableId);
-              transaction.set(
-                tableRef,
-                sanitizeForFirestore({
-                  id: orderToSave.tableId,
-                  name: orderToSave.tableName || localTable?.name || 'Mesa',
-                  number: localTable?.number || 1,
-                  type: localTable?.type || 'table',
-                  active: true,
-                  seats: localTable?.seats || 4,
-                  status: 'activa',
-                  currentOrderId: orderToSave.id,
-                  updatedAt: nowIso,
-                })
-              );
-            }
-          }
-
-          transaction.set(orderRef, orderToSave);
-        });
-      } else {
-        await saveOfflineOrder(orderToSave);
-        const count = await getOfflinePendingCount();
-        setPendingOfflineCount(count);
-      }
-
-      // Optimistic local state update so UI reflects saved order immediately
+    if (!isOnline) {
+      await saveOfflineOrder(orderToSave, currentUser?.uid);
+      setPendingOfflineCount(await getOfflinePendingCount());
+      setOrders(prev => [orderToSave, ...prev.filter(o => o.id !== orderToSave.id)]);
       setCurrentOrder(orderToSave);
-      setOrders(prev => {
-        const existsIdx = prev.findIndex(o => o.id === orderToSave.id);
-        if (existsIdx >= 0) {
-          const updated = [...prev];
-          updated[existsIdx] = orderToSave;
-          return updated;
-        }
-        return [orderToSave, ...prev];
+      return { success: true, order: orderToSave };
+    }
+
+    try {
+      const batch = writeBatch(db);
+      batch.set(doc(db, 'orders', orderToSave.id), sanitizeForFirestore(orderToSave), {
+        merge: true,
       });
-      if (orderToSave.tableId) {
-        setTables(prev =>
-          prev.map(t =>
-            t.id === orderToSave.tableId
-              ? { ...t, status: 'activa', currentOrderId: orderToSave.id, updatedAt: nowIso }
-              : t
-          )
-        );
+
+      if (nextOpStatus !== 'pending_auth' && nextOpStatus !== 'cancelled') {
+        const projection = buildKitchenProjection(orderToSave, nextOpStatus);
+        batch.set(doc(db, 'kitchen_orders', orderToSave.id), sanitizeForFirestore(projection), {
+          merge: true,
+        });
       }
 
+      if (orderToSave.serviceType === 'mesa' && orderToSave.tableId) {
+        batch.update(doc(db, 'tables', orderToSave.tableId), {
+          status:
+            orderToSave.financialStatus === 'paid' && nextOpStatus === 'delivered'
+              ? 'libre'
+              : 'activa',
+          currentOrderId:
+            orderToSave.financialStatus === 'paid' && nextOpStatus === 'delivered'
+              ? null
+              : orderToSave.id,
+          updatedAt: nowIso,
+        });
+      }
+
+      await batch.commit();
+      setCurrentOrder(orderToSave);
       return { success: true, order: orderToSave };
     } catch (error: any) {
-      if (!isOnline) {
-        await saveOfflineOrder(orderToSave);
-        const count = await getOfflinePendingCount();
-        setPendingOfflineCount(count);
-        setCurrentOrder(orderToSave);
-        return { success: true, order: orderToSave };
-      } else {
-        console.error('Error guardando orden:', error);
-        return { success: false, error: error.message || 'Error guardando la comanda en la base de datos.' };
-      }
+      handleFirestoreError(error, OperationType.WRITE, `orders/${orderToSave.id}`);
+      return { success: false, error: 'Error guardando la orden en Firestore.' };
     }
   };
 
-  const updateOrderStatus = async (orderId: string, newStatus: OrderStatus) => {
-    const order = orders.find(o => o.id === orderId) || (currentOrder?.id === orderId ? currentOrder : null);
-    if (!order) return;
+  const authorizeOrderToKitchen = async (
+    orderId: string
+  ): Promise<{ success: boolean; error?: string }> => {
+    const target = orders.find(o => o.id === orderId);
+    if (!target) return { success: false, error: 'Orden no encontrada.' };
 
     const nowIso = new Date().toISOString();
-    const updatedHistory = [
-      ...(order.changeHistory || []),
-      {
-        timestamp: nowIso,
-        user: appUser?.displayName || 'Colaborador',
-        action: `Cambio de estado: ${newStatus.toUpperCase()}`,
-        details: `De ${order.status} a ${newStatus}`,
-      },
-    ];
-
-    try {
-      await updateDoc(doc(db, 'orders', orderId), {
-        status: newStatus,
-        updatedAt: nowIso,
-        changeHistory: updatedHistory,
-      });
-
-      if (currentOrder && currentOrder.id === orderId) {
-        setCurrentOrder({
-          ...currentOrder,
-          status: newStatus,
-          updatedAt: nowIso,
-          changeHistory: updatedHistory,
-        });
-      }
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `orders/${orderId}`);
-    }
-  };
-
-  const cancelOrder = async (orderId: string, reason: string) => {
-    if (!isAdmin) {
-      throw new Error('Seguridad: Solo los administradores pueden anular órdenes confirmadas.');
+    let updatedItems = target.items;
+    if (restaurantConfig.inventoryDeductionTrigger === 'kitchen_auth') {
+      updatedItems = await deductInventoryDeltaForOrder(target);
     }
 
-    const order = orders.find(o => o.id === orderId) || (currentOrder?.id === orderId ? currentOrder : null);
-    if (!order) return;
-
-    if (order.status === 'cancelled') {
-      throw new Error('Esta orden ya fue anulada previamente.');
-    }
-
-    const nowIso = new Date().toISOString();
-
-    try {
-      await runTransaction(db, async transaction => {
-        // --- PHASE 1: ALL READS FIRST ---
-        const orderRef = doc(db, 'orders', orderId);
-        const orderSnap = await transaction.get(orderRef);
-        const liveOrder = orderSnap.exists() ? (orderSnap.data() as RestaurantOrder) : order;
-
-        if (liveOrder.status === 'cancelled') {
-          return;
-        }
-
-        const wasPaid = liveOrder.paymentStatus === 'paid';
-        const hadInventoryDeducted = Boolean(liveOrder.inventoryDeducted);
-
-        // 1. Read Cash Register if was paid
-        let regData: any = null;
-        const regRef = doc(db, 'cash_registers', cashRegister.id);
-        if (wasPaid) {
-          const regSnap = await transaction.get(regRef);
-          if (regSnap.exists()) {
-            regData = regSnap.data();
-          }
-        }
-
-        // 2. Read inventory items to restore if inventory was deducted
-        const itemsToRestore: Record<string, { itemId: string; itemName: string; quantity: number; unit?: any }> = {};
-        if (hadInventoryDeducted && liveOrder.items && liveOrder.items.length > 0) {
-          for (const item of liveOrder.items) {
-            const recipe = recipes.find(r => {
-              if (item.isCasado || item.selectedProtein) {
-                return (
-                  r.productId === item.productId &&
-                  r.protein?.toLowerCase() === item.selectedProtein?.toLowerCase()
-                );
-              }
-              return r.productId === item.productId;
-            });
-
-            if (recipe && recipe.autoDeductEnabled !== false && recipe.ingredients) {
-              for (const ing of recipe.ingredients) {
-                const qtyToReturn = Math.round(Number(ing.quantity || 0) * Number(item.quantity || 1) * 1000) / 1000;
-                if (!itemsToRestore[ing.itemId]) {
-                  itemsToRestore[ing.itemId] = {
-                    itemId: ing.itemId,
-                    itemName: ing.itemName,
-                    quantity: qtyToReturn,
-                    unit: ing.unit,
-                  };
-                } else {
-                  itemsToRestore[ing.itemId].quantity =
-                    Math.round((itemsToRestore[ing.itemId].quantity + qtyToReturn) * 1000) / 1000;
-                }
-              }
-            }
-          }
-        }
-
-        const invSnaps: Record<string, any> = {};
-        for (const itemId of Object.keys(itemsToRestore)) {
-          const itemDocRef = doc(db, 'inventory_items', itemId);
-          const snap = await transaction.get(itemDocRef);
-          invSnaps[itemId] = snap;
-        }
-
-        // --- PHASE 2: ALL WRITES ---
-        // 1. Revert cash register totals if was paid
-        if (wasPaid && regData) {
-          const isCash = liveOrder.paymentMethod === 'efectivo';
-          const isSinpe = liveOrder.paymentMethod === 'sinpe';
-          const isCard = liveOrder.paymentMethod === 'tarjeta';
-
-          const newCashSales = Math.max(0, (regData.cashSales || 0) - (isCash ? liveOrder.total : 0));
-          const newSinpeSales = Math.max(0, (regData.sinpeSales || 0) - (isSinpe ? liveOrder.total : 0));
-          const newCardSales = Math.max(0, (regData.cardSales || 0) - (isCard ? liveOrder.total : 0));
-          const newExpectedCash = Math.max(
-            0,
-            (regData.initialCash || 0) +
-              newCashSales -
-              (regData.cashPurchases || 0) -
-              (regData.cashExpenses || 0)
-          );
-
-          transaction.update(regRef, {
-            cashSales: newCashSales,
-            sinpeSales: newSinpeSales,
-            cardSales: newCardSales,
-            expectedCash: newExpectedCash,
-          });
-
-          // Record reversal cash movement
-          const revMovId = `mov_rev_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`;
-          const revMovRef = doc(db, 'cash_movements', revMovId);
-          transaction.set(revMovRef, {
-            id: revMovId,
-            registerId: cashRegister.id,
-            type: 'adjustment',
-            amount: -liveOrder.total,
-            paymentMethod: liveOrder.paymentMethod || 'efectivo',
-            referenceId: liveOrder.orderNumber,
-            description: `Reversión por anulación de comanda ${liveOrder.orderNumber} (Motivo: ${reason})`,
-            performedBy: appUser?.displayName || currentUser?.email || 'Administrador',
-            createdAt: nowIso,
-          });
-        }
-
-        // 2. Free Table if assigned
-        if (liveOrder.tableId) {
-          const tableRef = doc(db, 'tables', liveOrder.tableId);
-          transaction.update(tableRef, {
-            status: 'libre',
-            currentOrderId: null,
-            updatedAt: nowIso,
-          });
-        }
-
-        // 3. Restore inventory items if inventory was deducted
-        if (hadInventoryDeducted) {
-          for (const [itemId, restoreInfo] of Object.entries(itemsToRestore)) {
-            const snap = invSnaps[itemId];
-            if (snap && snap.exists()) {
-              const liveInv = snap.data() as InventoryItem;
-              const prevStock = Number(liveInv.currentStock) || 0;
-              const newStock = Math.round((prevStock + restoreInfo.quantity) * 1000) / 1000;
-
-              transaction.update(doc(db, 'inventory_items', itemId), {
-                currentStock: newStock,
-                updatedAt: nowIso,
-              });
-
-              const rstMovId = `mov_rst_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-              const rstMovRef = doc(db, 'inventory_movements', rstMovId);
-              transaction.set(rstMovRef, {
-                id: rstMovId,
-                itemId,
-                itemName: liveInv.name || restoreInfo.itemName,
-                type: 'adjustment',
-                quantity: restoreInfo.quantity,
-                previousStock: prevStock,
-                newStock,
-                unit: liveInv.unit || restoreInfo.unit,
-                unitCost: liveInv.averageCost || liveInv.lastPurchaseCost || 0,
-                referenceId: liveOrder.orderNumber,
-                reason: `Reposición por anulación de comanda ${liveOrder.orderNumber} (${reason})`,
-                performedBy: appUser?.displayName || currentUser?.email || 'Administrador',
-                performedByEmail: currentUser?.email || undefined,
-                createdAt: nowIso,
-              });
-            }
-          }
-        }
-
-        // 4. Update order document with immutable history
-        const updatedHistory = [
-          ...(liveOrder.changeHistory || []),
-          {
-            timestamp: nowIso,
-            user: appUser?.displayName || currentUser?.email || 'Administrador',
-            action: 'Anulación de comanda',
-            details: `Motivo: ${reason}${wasPaid ? ' (Venta revertida en caja)' : ''}${
-              hadInventoryDeducted ? ' (Insumos repuestos en inventario)' : ''
-            }`,
-          },
-        ];
-
-        transaction.update(orderRef, {
-          status: 'cancelled',
-          paymentStatus: wasPaid ? 'unpaid' : liveOrder.paymentStatus,
-          inventoryDeducted: false,
-          cancellationReason: reason,
-          updatedAt: nowIso,
-          changeHistory: updatedHistory,
-        });
-
-        // 5. Audit Log with anti-spoofing identity
-        const auditId = `aud_cncl_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-        const auditRef = doc(db, 'audit_logs', auditId);
-        transaction.set(auditRef, {
-          id: auditId,
-          action: 'cancel_order',
-          collection: 'orders',
-          documentId: orderId,
-          reason,
-          performedBy: appUser?.displayName || currentUser?.email || 'Administrador',
-          performedByUid: currentUser?.uid || '',
-          performedByEmail: currentUser?.email || '',
-          timestamp: nowIso,
-          details: `Comanda ${liveOrder.orderNumber} por ₡${liveOrder.total} anulada.${
-            wasPaid ? ' Reversión de caja aplicada.' : ''
-          }${hadInventoryDeducted ? ' Inventario restituido.' : ''}`,
-        });
-      });
-
-      if (currentOrder?.id === orderId) {
-        setCurrentOrder(null);
-      }
-      if (selectedTable?.id === order.tableId) {
-        setSelectedTable(null);
-      }
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `orders/${orderId}`);
-      throw error;
-    }
-  };
-
-  // --------------------------------------------------------------------------
-  // KITCHEN TICKETS (80mm)
-  // --------------------------------------------------------------------------
-  const printOrderTicket = async (order: RestaurantOrder) => {
-    const isReprint = kitchenTickets.some(t => t.orderId === order.id);
-    const reprintCount = kitchenTickets.filter(t => t.orderId === order.id).length;
-
-    const ticket = sanitizeForFirestore(createKitchenTicketFromOrder(order, isReprint, reprintCount));
-
-    try {
-      await setDoc(doc(db, 'kitchen_tickets', ticket.id), ticket);
-    } catch (err) {
-      console.warn('Error registrando ticket en Firestore:', err);
-    }
-
-    setActiveTicketToPrint(ticket);
-    printKitchenTicket(ticket);
-  };
-
-  // --------------------------------------------------------------------------
-  // CHECKOUT WITH SECURE FIRESTORE TRANSACTION
-  // --------------------------------------------------------------------------
-  const completeOrderPayment = async (
-    orderId: string,
-    method: PaymentMethod,
-    receivedCash?: number
-  ): Promise<{ success: boolean; change?: number; error?: string }> => {
-    const order = orders.find(o => o.id === orderId) || (currentOrder?.id === orderId ? currentOrder : null);
-    if (!order) {
-      return { success: false, error: 'Orden no encontrada.' };
-    }
-
-    if (order.paymentStatus === 'paid') {
-      return { success: false, error: 'Esta orden ya fue cobrada previamente en otro dispositivo.' };
-    }
-
-    let change = 0;
-    if (method === 'efectivo' && receivedCash !== undefined) {
-      if (receivedCash < order.total) {
-        return { success: false, error: `Efectivo insuficiente. Total es ${order.total} y se entregaron ${receivedCash}.` };
-      }
-      change = receivedCash - order.total;
-    }
-
-    const nowIso = new Date().toISOString();
-    const movementId = `mov_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-
-    const movement: CashMovement = sanitizeForFirestore({
-      id: movementId,
-      registerId: cashRegister.id,
-      type: 'sale',
-      amount: order.total,
-      paymentMethod: method,
-      referenceId: order.orderNumber,
-      description: `Venta orden ${order.orderNumber} (${order.serviceType})`,
-      performedBy: appUser?.displayName || 'Colaborador',
-      createdAt: nowIso,
-    });
-
-    try {
-      // Execute atomic transaction on Firestore
-      await runTransaction(db, async transaction => {
-        // --- PHASE 1: ALL READS FIRST ---
-        // 1. Order Read
-        const orderRef = doc(db, 'orders', orderId);
-        const orderSnap = await transaction.get(orderRef);
-        let liveOrder: RestaurantOrder = order;
-
-        if (orderSnap.exists()) {
-          liveOrder = orderSnap.data() as RestaurantOrder;
-          if (liveOrder.paymentStatus === 'paid') {
-            throw new Error('Esta orden ya fue pagada en otro terminal.');
-          }
-        }
-
-        // 1b. Table Read (if order is associated with a table)
-        let tableRef: any = null;
-        let tableSnap: any = null;
-        if (order.tableId) {
-          tableRef = doc(db, 'tables', order.tableId);
-          tableSnap = await transaction.get(tableRef);
-        }
-
-        // 2. Cash Register Read
-        const regRef = doc(db, 'cash_registers', cashRegister.id);
-        const regSnap = await transaction.get(regRef);
-
-        // 3. Plan Inventory Deductions via Recipes (if not already deducted)
-        const shouldDeductInventory = !liveOrder.inventoryDeducted;
-        const deductionsMap: Record<
-          string,
-          { itemId: string; itemName: string; quantity: number; unit: any; unitCost: number }
-        > = {};
-
-        if (shouldDeductInventory && liveOrder.items && liveOrder.items.length > 0) {
-          for (const item of liveOrder.items) {
-            // Match recipe: if Casado, match by protein; else by productId
-            const matchedRecipe = recipes.find(r => {
-              if (item.isCasado || item.selectedProtein) {
-                return (
-                  r.productId === item.productId &&
-                  r.protein?.toLowerCase() === item.selectedProtein?.toLowerCase()
-                );
-              }
-              return r.productId === item.productId;
-            });
-
-            if (matchedRecipe && matchedRecipe.autoDeductEnabled !== false && matchedRecipe.ingredients) {
-              for (const ing of matchedRecipe.ingredients) {
-                const consumed = Math.round(Number(ing.quantity || 0) * Number(item.quantity || 1) * 1000) / 1000;
-                if (!deductionsMap[ing.itemId]) {
-                  deductionsMap[ing.itemId] = {
-                    itemId: ing.itemId,
-                    itemName: ing.itemName,
-                    quantity: consumed,
-                    unit: ing.unit,
-                    unitCost: ing.unitCost || 0,
-                  };
-                } else {
-                  deductionsMap[ing.itemId].quantity =
-                    Math.round((deductionsMap[ing.itemId].quantity + consumed) * 1000) / 1000;
-                }
-              }
-            }
-          }
-        }
-
-        // 4. Read all matching inventory item documents in transaction
-        const invItemSnaps: Record<string, any> = {};
-        for (const itemId of Object.keys(deductionsMap)) {
-          const invDocRef = doc(db, 'inventory_items', itemId);
-          const snap = await transaction.get(invDocRef);
-          invItemSnaps[itemId] = snap;
-        }
-
-        // --- PHASE 2: ALL WRITES ---
-        // 1. Order Update / Set
-        const changeHistoryEntry = {
-          timestamp: nowIso,
-          user: appUser?.displayName || 'Colaborador',
-          action: 'Cobro de orden',
-          details: `Método: ${method.toUpperCase()} - Total: ₡${order.total}${
-            shouldDeductInventory ? ' (Descuento automático de inventario ejecutado)' : ''
-          }`,
-        };
-
-        if (!orderSnap.exists()) {
-          transaction.set(
-            orderRef,
-            sanitizeForFirestore({
-              ...order,
-              status: 'completed',
-              paymentStatus: 'paid',
-              paymentMethod: method,
-              paidAt: nowIso,
-              updatedAt: nowIso,
-              inventoryDeducted: true,
-              inventoryDeductedAt: nowIso,
-              changeHistory: [...(order.changeHistory || []), changeHistoryEntry],
-            })
-          );
-        } else {
-          transaction.update(
-            orderRef,
-            sanitizeForFirestore({
-              status: 'completed',
-              paymentStatus: 'paid',
-              paymentMethod: method,
-              paidAt: nowIso,
-              updatedAt: nowIso,
-              inventoryDeducted: true,
-              inventoryDeductedAt: nowIso,
-              changeHistory: [...(liveOrder.changeHistory || []), changeHistoryEntry],
-            })
-          );
-        }
-
-        // 2. Free Table atomically
-        if (order.tableId && tableRef && tableSnap && tableSnap.exists()) {
-          transaction.update(tableRef, {
-            status: 'libre',
-            currentOrderId: null,
-            updatedAt: nowIso,
-          });
-        }
-
-        // 3. Update active Cash Register totals
-        if (regSnap.exists()) {
-          const regData = regSnap.data();
-          const isCash = method === 'efectivo';
-          const isSinpe = method === 'sinpe';
-          const isCard = method === 'tarjeta';
-
-          const newCashSales = (regData.cashSales || 0) + (isCash ? order.total : 0);
-          const newSinpeSales = (regData.sinpeSales || 0) + (isSinpe ? order.total : 0);
-          const newCardSales = (regData.cardSales || 0) + (isCard ? order.total : 0);
-          const newExpectedCash =
-            (regData.initialCash || 0) +
-            newCashSales -
-            (regData.cashPurchases || 0) -
-            (regData.cashExpenses || 0);
-
-          transaction.update(regRef, {
-            cashSales: newCashSales,
-            sinpeSales: newSinpeSales,
-            cardSales: newCardSales,
-            expectedCash: newExpectedCash,
-          });
-        }
-
-        // 4. Create single idempotent cash movement
-        const movRef = doc(db, 'cash_movements', movementId);
-        transaction.set(movRef, movement);
-
-        // 5. Deduct inventory items and generate atomic consumption movements
-        if (shouldDeductInventory) {
-          for (const [itemId, deduction] of Object.entries(deductionsMap)) {
-            const snap = invItemSnaps[itemId];
-            if (snap && snap.exists()) {
-              const liveInv = snap.data() as InventoryItem;
-              const prevStock = Number(liveInv.currentStock) || 0;
-              const newStock = Math.round((prevStock - deduction.quantity) * 1000) / 1000;
-
-              transaction.update(doc(db, 'inventory_items', itemId), {
-                currentStock: newStock,
-                updatedAt: nowIso,
-              });
-
-              const cnsMovId = `mov_cns_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-              const cnsMovRef = doc(db, 'inventory_movements', cnsMovId);
-              transaction.set(cnsMovRef, {
-                id: cnsMovId,
-                itemId,
-                itemName: liveInv.name || deduction.itemName,
-                type: 'consumption',
-                quantity: -deduction.quantity,
-                previousStock: prevStock,
-                newStock,
-                unit: liveInv.unit || deduction.unit,
-                unitCost: liveInv.averageCost || liveInv.lastPurchaseCost || deduction.unitCost,
-                referenceId: liveOrder.orderNumber,
-                reason: `Consumo comanda ${liveOrder.orderNumber} (${liveOrder.serviceType})`,
-                performedBy: appUser?.displayName || 'Colaborador',
-                performedByEmail: currentUser?.email || undefined,
-                createdAt: nowIso,
-              });
-            }
-          }
-        }
-      });
-
-      if (selectedTable?.id === order.tableId) {
-        setSelectedTable(null);
-      }
-
-      return { success: true, change };
-    } catch (error: any) {
-      if (!isOnline) {
-        // Fallback to offline queue
-        await saveOfflineOrder({
-          ...order,
-          status: 'completed',
-          paymentStatus: 'paid',
-          paymentMethod: method,
-          paidAt: nowIso,
-          updatedAt: nowIso,
-        });
-        const count = await getOfflinePendingCount();
-        setPendingOfflineCount(count);
-        return { success: true, change };
-      }
-
-      console.error('Error en transacción de cobro:', error);
-      return { success: false, error: error.message || 'Error en la transacción contable.' };
-    }
-  };
-
-  const recordPhysicalCount = async (actualCash: number, countNotes?: string) => {
-    if (!isAdmin) {
-      throw new Error('Restricción: Solo el Administrador puede registrar arqueos físicos de caja.');
-    }
-
-    const difference = actualCash - cashRegister.expectedCash;
-    const payload = {
-      actualCash,
-      difference,
-      notes: countNotes || cashRegister.notes || '',
-    };
-
-    try {
-      await updateDoc(doc(db, 'cash_registers', cashRegister.id), payload);
-      await addAuditLog(
-        'cash_count',
-        'cash_registers',
-        cashRegister.id,
-        'Arqueo físico de caja',
-        `Esperado: ₡${cashRegister.expectedCash} - Físico: ₡${actualCash} - Dif: ₡${difference}`
-      );
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `cash_registers/${cashRegister.id}`);
-    }
-  };
-
-  const openNewDayRegister = async (initialFloat: number) => {
-    if (!isAdmin) return;
-
-    const dateStr = getCostaRicaDateString();
-    const newRegId = `reg_${dateStr}_${Date.now()}`;
-    const newRegister: CashRegister = {
-      id: newRegId,
-      date: dateStr,
-      status: 'open',
-      openedAt: new Date().toISOString(),
-      openedBy: appUser?.displayName || 'Administrador',
-      initialCash: initialFloat,
-      cashSales: 0,
-      sinpeSales: 0,
-      cardSales: 0,
-      cashPurchases: 0,
-      cashExpenses: 0,
-      expectedCash: initialFloat,
-    };
-
-    try {
-      await setDoc(doc(db, 'cash_registers', newRegId), newRegister);
-      setCashRegister(newRegister);
-      await addAuditLog('open_register', 'cash_registers', newRegId, 'Apertura de turno de caja', `Fondo inicial: ₡${initialFloat}`);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, 'cash_registers');
-    }
-  };
-
-  // --------------------------------------------------------------------------
-  // INVENTORY & PURCHASES WITH FIRESTORE TRANSACTIONS
-  // --------------------------------------------------------------------------
-  const addPurchase = async (purchaseData: Omit<PurchaseRecord, 'id' | 'createdAt' | 'registeredBy'>) => {
-    if (!isAdmin) {
-      throw new Error('Seguridad: Solo administradores pueden registrar compras de insumos.');
-    }
-
-    const nowIso = new Date().toISOString();
-    const newPurchaseId = `pur_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-    const newPurchase: PurchaseRecord = {
-      ...purchaseData,
-      id: newPurchaseId,
-      registeredBy: appUser?.displayName || 'Administrador',
-      createdAt: nowIso,
-    };
-
-    try {
-      await runTransaction(db, async transaction => {
-        // --- PHASE 1: ALL TRANSACTIONAL READS FIRST ---
-        // 0. Unique invoice locking to prevent concurrent duplicate invoices across devices
-        const cleanVendor = (newPurchase.vendor || '').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '_');
-        const cleanInvoiceNum = (newPurchase.purchaseNumber || '').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '_');
-        let invoiceLockRef: any = null;
-        if (cleanVendor.length > 0 && cleanInvoiceNum.length > 0) {
-          const lockDocId = `lock_${cleanVendor}__${cleanInvoiceNum}`;
-          invoiceLockRef = doc(db, 'purchase_invoice_locks', lockDocId);
-          const lockSnap = await transaction.get(invoiceLockRef);
-          if (lockSnap.exists()) {
-            const existingLock = lockSnap.data() as any;
-            throw new Error(
-              `FACTURA_DUPLICADA: La factura #${newPurchase.purchaseNumber} del proveedor "${newPurchase.vendor}" ya fue registrada previamente ` +
-              `(Fecha: ${existingLock?.registeredAt ? new Date(existingLock.registeredAt).toLocaleDateString() : 'N/A'}, Total: ₡${Number(existingLock?.total || 0).toLocaleString()}). ` +
-              `Operación rechazada automáticamente.`
-            );
-          }
-        }
-
-        // 1. Read cash register if paying from cash drawer
-        let regData: any = null;
-        const regRef = doc(db, 'cash_registers', cashRegister.id);
-        if (newPurchase.paidFromCashRegister && newPurchase.paymentMethod === 'efectivo') {
-          const regSnap = await transaction.get(regRef);
-          if (regSnap.exists()) {
-            regData = regSnap.data();
-          }
-        }
-
-        // 2. Read matching inventory items
-        const itemPlan: {
-          purchaseItem: PurchaseLineItem;
-          invRef: any;
-          existingData: InventoryItem | null;
-          isNew: boolean;
-        }[] = [];
-
-        for (const pItem of newPurchase.items) {
-          const nameToMatch = (pItem.normalizedName || pItem.name).trim().toLowerCase();
-          const existing = inventory.find(inv => inv.name.trim().toLowerCase() === nameToMatch);
-
-          if (existing) {
-            const invRef = doc(db, 'inventory_items', existing.id);
-            const snap = await transaction.get(invRef);
-            itemPlan.push({
-              purchaseItem: pItem,
-              invRef,
-              existingData: snap.exists() ? (snap.data() as InventoryItem) : existing,
-              isNew: false,
-            });
-          } else {
-            const newItemId = `inv_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-            const invRef = doc(db, 'inventory_items', newItemId);
-            itemPlan.push({
-              purchaseItem: pItem,
-              invRef,
-              existingData: null,
-              isNew: true,
-            });
-          }
-        }
-
-        // --- PHASE 2: ALL TRANSACTIONAL WRITES ---
-        // 1. Save purchase document
-        const purRef = doc(db, 'purchases', newPurchaseId);
-        transaction.set(purRef, newPurchase);
-
-        // 2. Update cash register and record cash movement if paid in cash
-        if (regData && newPurchase.paidFromCashRegister && newPurchase.paymentMethod === 'efectivo') {
-          const newCashPurchases = (regData.cashPurchases || 0) + newPurchase.total;
-          const newExpectedCash = (regData.expectedCash || 0) - newPurchase.total;
-
-          transaction.update(regRef, {
-            cashPurchases: newCashPurchases,
-            expectedCash: newExpectedCash,
-          });
-
-          const movId = `mov_pur_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`;
-          const movRef = doc(db, 'cash_movements', movId);
-          transaction.set(movRef, {
-            id: movId,
-            registerId: cashRegister.id,
-            type: 'purchase',
-            amount: newPurchase.total,
-            paymentMethod: 'efectivo',
-            referenceId: newPurchase.purchaseNumber || newPurchaseId,
-            description: `Compra proveedor ${newPurchase.vendor || 'General'}`,
-            performedBy: appUser?.displayName || 'Administrador',
-            createdAt: nowIso,
-          });
-        }
-
-        // 3. Update / Create inventory items and generate atomic inventory_movements
-        for (const item of itemPlan) {
-          const { purchaseItem, invRef, existingData, isNew } = item;
-          const pUnit = normalizeUnitString(purchaseItem.unit);
-          const pQty = Number(purchaseItem.quantity) || 0;
-          const pUnitCost = Number(purchaseItem.unitCost) || 0;
-
-          if (!isNew && existingData) {
-            // Unit conversion & Weighted Average Cost
-            const conversion = convertToInventoryUnit(pQty, pUnit, pUnitCost, existingData.unit);
-            const convertedQty = conversion.convertedQuantity;
-            const convertedUnitCost = conversion.convertedUnitCost;
-
-            const prevStock = Number(existingData.currentStock) || 0;
-            const newStock = Math.round((prevStock + convertedQty) * 1000) / 1000;
-
-            const prevAverageCost = existingData.averageCost || existingData.lastPurchaseCost || 0;
-            const newAverageCost = calculateWeightedAverageCost(
-              prevStock,
-              prevAverageCost,
-              convertedQty,
-              convertedUnitCost
-            );
-
-            transaction.update(invRef, {
-              currentStock: newStock,
-              lastPurchaseCost: convertedUnitCost,
-              averageCost: newAverageCost,
-              updatedAt: nowIso,
-            });
-
-            // Write inventory movement record
-            const movId = `mov_inv_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-            const movRef = doc(db, 'inventory_movements', movId);
-            const movData: InventoryMovement = {
-              id: movId,
-              itemId: existingData.id,
-              itemName: existingData.name,
-              type: 'purchase',
-              quantity: convertedQty,
-              previousStock: prevStock,
-              newStock,
-              unit: existingData.unit,
-              unitCost: convertedUnitCost,
-              referenceId: newPurchaseId,
-              reason: `Factura ${newPurchase.purchaseNumber || 'S/N'} (${newPurchase.vendor || 'Proveedor'})`,
-              performedBy: appUser?.displayName || 'Administrador',
-              performedByEmail: currentUser?.email || undefined,
-              createdAt: nowIso,
-            };
-            transaction.set(movRef, movData);
-          } else {
-            // New inventory item
-            const newItemName = (purchaseItem.normalizedName || purchaseItem.name).trim();
-            const newItem: InventoryItem = {
-              id: invRef.id,
-              name: newItemName,
-              category: 'ingredientes',
-              unit: pUnit,
-              currentStock: pQty,
-              lastPurchaseCost: pUnitCost,
-              averageCost: pUnitCost,
-              updatedAt: nowIso,
-            };
-            transaction.set(invRef, newItem);
-
-            // Initial movement
-            const movId = `mov_inv_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-            const movRef = doc(db, 'inventory_movements', movId);
-            const movData: InventoryMovement = {
-              id: movId,
-              itemId: invRef.id,
-              itemName: newItemName,
-              type: 'purchase',
-              quantity: pQty,
-              previousStock: 0,
-              newStock: pQty,
-              unit: pUnit,
-              unitCost: pUnitCost,
-              referenceId: newPurchaseId,
-              reason: `Ingreso inicial compra ${newPurchase.purchaseNumber || 'S/N'}`,
-              performedBy: appUser?.displayName || 'Administrador',
-              performedByEmail: currentUser?.email || undefined,
-              createdAt: nowIso,
-            };
-            transaction.set(movRef, movData);
-          }
-        }
-
-        // 4. Unique Invoice Lock Write (Concurrent protection)
-        if (invoiceLockRef) {
-          transaction.set(invoiceLockRef, {
-            id: invoiceLockRef.id,
-            vendor: newPurchase.vendor || 'General',
-            purchaseNumber: newPurchase.purchaseNumber,
-            purchaseId: newPurchaseId,
-            total: newPurchase.total,
-            registeredAt: nowIso,
-            registeredBy: appUser?.displayName || 'Administrador',
-            registeredByEmail: currentUser?.email || '',
-          });
-        }
-
-        // 5. Audit Log
-        const audId = `aud_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-        const audRef = doc(db, 'audit_logs', audId);
-        transaction.set(audRef, {
-          id: audId,
-          action: 'add_purchase',
-          collection: 'purchases',
-          documentId: newPurchaseId,
-          reason: 'Registro de compra con actualización de costo promedio ponderado',
-          performedBy: appUser?.displayName || currentUser?.email || 'Administrador',
-          performedByUid: currentUser?.uid || '',
-          performedByEmail: currentUser?.email || '',
-          timestamp: nowIso,
-          details: `Compra ${newPurchase.purchaseNumber || 'S/N'} (${newPurchase.vendor || 'Proveedor'}) - Total: ₡${newPurchase.total} (${newPurchase.items.length} ítems)`,
-        });
-      });
-    } catch (error: any) {
-      if (error?.message && error.message.startsWith('FACTURA_DUPLICADA')) {
-        throw error;
-      }
-      handleFirestoreError(error, OperationType.WRITE, 'purchases');
-      throw error;
-    }
-  };
-
-  const updateInventoryStock = async (itemId: string, newStock: number, reason: string) => {
-    if (!isAdmin) return;
-    const nowIso = new Date().toISOString();
-    const existing = inventory.find(i => i.id === itemId);
-    const prevStock = existing ? existing.currentStock : 0;
-    const delta = Math.round((newStock - prevStock) * 1000) / 1000;
-
-    try {
-      await updateDoc(doc(db, 'inventory_items', itemId), {
-        currentStock: newStock,
-        updatedAt: nowIso,
-      });
-
-      const movementId = `mov_adj_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-      await setDoc(doc(db, 'inventory_movements', movementId), {
-        id: movementId,
-        itemId,
-        itemName: existing?.name || 'Insumo',
-        type: 'adjustment',
-        quantity: delta,
-        previousStock: prevStock,
-        newStock,
-        unit: existing?.unit,
-        reason,
-        performedBy: appUser?.displayName || 'Administrador',
-        performedByEmail: currentUser?.email || undefined,
-        createdAt: nowIso,
-      });
-
-      await addAuditLog('inventory_adjustment', 'inventory_items', itemId, reason, `Ajuste manual de stock: ${prevStock} -> ${newStock} (${delta >= 0 ? '+' : ''}${delta})`);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `inventory_items/${itemId}`);
-    }
-  };
-
-  // --------------------------------------------------------------------------
-  // EXPENSES WITH FIRESTORE
-  // --------------------------------------------------------------------------
-  const addExpense = async (expenseData: Omit<OperatingExpense, 'id' | 'createdAt' | 'status'>) => {
-    if (!isAdmin) return;
-    const newExpId = `exp_${Date.now()}`;
-    const newExp: OperatingExpense = {
-      ...expenseData,
-      id: newExpId,
-      status: 'pending',
-      createdAt: new Date().toISOString(),
-    };
-
-    try {
-      await setDoc(doc(db, 'operating_expenses', newExpId), newExp);
-      await addAuditLog('add_expense', 'operating_expenses', newExpId, 'Gasto operativo registrado', `Monto: ₡${newExp.amount}`);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, 'operating_expenses');
-    }
-  };
-
-  const markExpensePaid = async (expenseId: string, method: PaymentMethod, fromCash: boolean) => {
-    if (!isAdmin) return;
-    const nowIso = new Date().toISOString();
-    const target = expenses.find(e => e.id === expenseId);
-    if (!target) return;
-
-    try {
-      await updateDoc(doc(db, 'operating_expenses', expenseId), {
-        status: 'paid',
-        lastPaidAt: nowIso,
-      });
-
-      if (fromCash && method === 'efectivo') {
-        const movId = `mov_exp_${Date.now()}`;
-        await setDoc(doc(db, 'cash_movements', movId), {
-          id: movId,
-          registerId: cashRegister.id,
-          type: 'expense',
-          amount: target.amount,
-          paymentMethod: 'efectivo',
-          referenceId: target.name,
-          description: `Pago de servicio: ${target.name}`,
-          performedBy: appUser?.displayName || 'Administrador',
-          createdAt: nowIso,
-        });
-
-        await updateDoc(doc(db, 'cash_registers', cashRegister.id), {
-          cashExpenses: (cashRegister.cashExpenses || 0) + target.amount,
-          expectedCash: (cashRegister.expectedCash || 0) - target.amount,
-        });
-      }
-
-      await addAuditLog('pay_expense', 'operating_expenses', expenseId, 'Gasto pagado', `Gasto: ${target.name} - ₡${target.amount}`);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `operating_expenses/${expenseId}`);
-    }
-  };
-
-  // --------------------------------------------------------------------------
-  // RECIPES, PRODUCTS & FORMULATIONS (Fase 3)
-  // --------------------------------------------------------------------------
-  const saveProduct = async (product: ProductItem) => {
-    if (!isAdmin) {
-      throw new Error('Seguridad: Solo administradores pueden modificar productos y precios del menú.');
-    }
-    const cleanProduct = sanitizeForFirestore({
-      ...product,
-      name: product.name.trim(),
-      price: Math.max(0, Number(product.price) || 0),
-    });
-    try {
-      await setDoc(doc(db, 'products', cleanProduct.id), cleanProduct);
-      await addAuditLog(
-        'save_product',
-        'products',
-        cleanProduct.id,
-        'Actualización de producto / precio de carta',
-        `Producto ${cleanProduct.name} — Precio: ₡${cleanProduct.price} (${cleanProduct.active ? 'Activo' : 'Inactivo'})`
-      );
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, 'products');
-      throw error;
-    }
-  };
-
-  const saveRecipe = async (recipe: Recipe) => {
-    if (!isAdmin) {
-      throw new Error('Seguridad: Solo administradores pueden modificar recetas y formulaciones.');
-    }
-    const nowIso = new Date().toISOString();
-    const updatedRecipe: Recipe = sanitizeForFirestore({
-      ...recipe,
+    const updatedOrder: RestaurantOrder = {
+      ...target,
+      items: updatedItems,
+      operationalStatus: 'authorized',
+      status: 'in_kitchen',
+      authorizedAt: nowIso,
+      inventoryDeducted:
+        restaurantConfig.inventoryDeductionTrigger === 'kitchen_auth'
+          ? true
+          : target.inventoryDeducted,
+      inventoryDeductedAt:
+        restaurantConfig.inventoryDeductionTrigger === 'kitchen_auth'
+          ? nowIso
+          : target.inventoryDeductedAt,
       updatedAt: nowIso,
-    });
-    try {
-      await setDoc(doc(db, 'recipes', recipe.id), updatedRecipe);
-      await addAuditLog(
-        'save_recipe',
-        'recipes',
-        recipe.id,
-        'Formulación de receta guardada',
-        `Receta ${recipe.productName} (${recipe.protein || 'Estándar'}) actualizada con ${recipe.ingredients.length} insumos.`
-      );
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, 'recipes');
-      throw error;
-    }
-  };
-
-  const toggleRecipeAutoDeduct = async (recipeId: string) => {
-    if (!isAdmin) return;
-    const recipe = recipes.find(r => r.id === recipeId);
-    if (!recipe) return;
-    if (!recipe.isComplete) {
-      throw new Error('No se puede activar el descuento automático en una receta incompleta o sin costeo.');
-    }
-    const nextVal = !recipe.autoDeductEnabled;
-    try {
-      await updateDoc(doc(db, 'recipes', recipeId), {
-        autoDeductEnabled: nextVal,
-        updatedAt: new Date().toISOString(),
-      });
-      await addAuditLog(
-        'toggle_recipe_autodeduct',
-        'recipes',
-        recipeId,
-        nextVal ? 'Activación descuento automático' : 'Pausa descuento automático',
-        `Receta ${recipe.productName} auto-descuento: ${nextVal ? 'ACTIVO' : 'PAUSADO'}`
-      );
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `recipes/${recipeId}`);
-      throw error;
-    }
-  };
-
-  const registerWaste = async (itemId: string, quantity: number, reason: string, customNotes?: string) => {
-    if (!isAdmin) {
-      throw new Error('Seguridad: Solo administradores pueden registrar mermas de inventario.');
-    }
-    const targetItem = inventory.find(i => i.id === itemId);
-    if (!targetItem) {
-      throw new Error('Insumo no encontrado en catálogo.');
-    }
-    const qtyToDeduct = Math.abs(quantity);
-    if (qtyToDeduct <= 0) return;
-
-    const nowIso = new Date().toISOString();
-    const movementId = `mov_wst_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-
-    try {
-      await runTransaction(db, async transaction => {
-        const itemRef = doc(db, 'inventory_items', itemId);
-        const itemSnap = await transaction.get(itemRef);
-        const currentData = itemSnap.exists() ? (itemSnap.data() as InventoryItem) : targetItem;
-
-        const prevStock = Number(currentData.currentStock) || 0;
-        const newStock = Math.round((prevStock - qtyToDeduct) * 1000) / 1000;
-
-        transaction.update(itemRef, {
-          currentStock: newStock,
-          updatedAt: nowIso,
-        });
-
-        const movRef = doc(db, 'inventory_movements', movementId);
-        transaction.set(movRef, {
-          id: movementId,
-          itemId,
-          itemName: currentData.name,
-          type: 'waste',
-          quantity: -qtyToDeduct,
-          previousStock: prevStock,
-          newStock,
-          unit: currentData.unit,
-          unitCost: currentData.averageCost || currentData.lastPurchaseCost || 0,
-          reason: `${reason}${customNotes ? `: ${customNotes}` : ''}`,
-          performedBy: appUser?.displayName || 'Administrador',
-          performedByEmail: currentUser?.email || undefined,
-          createdAt: nowIso,
-        });
-
-        const audId = `aud_wst_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-        const audRef = doc(db, 'audit_logs', audId);
-        transaction.set(audRef, {
-          id: audId,
-          action: 'waste_record',
-          collection: 'inventory_items',
-          documentId: itemId,
-          reason,
-          performedBy: appUser?.displayName || currentUser?.email || 'Administrador',
-          performedByUid: currentUser?.uid || '',
-          performedByEmail: currentUser?.email || '',
-          timestamp: nowIso,
-          details: `Merma de ${qtyToDeduct} ${currentData.unit} en ${currentData.name}. Motivo: ${reason}${customNotes ? ` (${customNotes})` : ''}`,
-        });
-      });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `inventory_items/${itemId}`);
-      throw error;
-    }
-  };
-
-  // --------------------------------------------------------------------------
-  // BACKUP AND RESTORE
-  // --------------------------------------------------------------------------
-  const exportDataBackup = (): string => {
-    if (!isAdmin) {
-      throw new Error('Seguridad: Solo los administradores pueden generar respaldos del sistema.');
-    }
-
-    const backupPayload = {
-      system: 'Pollos Karen Manager',
-      version: '1.0',
-      exportedAt: new Date().toISOString(),
-      exportedBy: appUser?.displayName || currentUser?.email || 'Administrador',
-      tables,
-      categories,
-      products,
-      inventory,
-      recipes,
-      purchases,
-      expenses,
-      cashRegisters: [cashRegister],
-      cashMovements,
-      orders,
-      auditLogs,
     };
-
-    return JSON.stringify(backupPayload, null, 2);
-  };
-
-  const restoreDataBackup = async (backupJson: string): Promise<{ success: boolean; message: string; count: number }> => {
-    if (!isAdmin) {
-      throw new Error('Seguridad: Solo los administradores pueden restaurar datos en el sistema.');
-    }
-
-    let parsed: any;
-    try {
-      parsed = JSON.parse(backupJson);
-    } catch {
-      throw new Error('El archivo no contiene un formato JSON válido.');
-    }
-
-    if (!parsed || parsed.system !== 'Pollos Karen Manager') {
-      throw new Error('El archivo seleccionado no corresponde a una copia de seguridad oficial de Pollos Karen Manager.');
-    }
-
-    const nowIso = new Date().toISOString();
-    let totalRestored = 0;
 
     const batch = writeBatch(db);
+    batch.set(doc(db, 'orders', orderId), sanitizeForFirestore(updatedOrder), { merge: true });
+    batch.set(
+      doc(db, 'kitchen_orders', orderId),
+      sanitizeForFirestore(buildKitchenProjection(updatedOrder, 'authorized')),
+      { merge: true }
+    );
+    await batch.commit();
 
-    if (Array.isArray(parsed.categories)) {
-      for (const cat of parsed.categories) {
-        if (cat.id) {
-          batch.set(doc(db, 'categories', cat.id), cat);
-          totalRestored++;
-        }
-      }
+    // Update public order status if it came from QR / Exprés
+    if (target.publicTrackingCode && currentUser) {
+      const token = await currentUser.getIdToken();
+      fetch(`/api/public/pending-orders/${target.publicTrackingCode}/status`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ operationalStatus: 'authorized', syncedToPos: true }),
+      }).catch(() => {});
     }
 
-    if (Array.isArray(parsed.products)) {
-      for (const prod of parsed.products) {
-        if (prod.id) {
-          batch.set(doc(db, 'products', prod.id), prod);
-          totalRestored++;
-        }
-      }
+    return { success: true };
+  };
+
+  const updateKitchenOrderStatus = async (
+    orderId: string,
+    nextStatus: 'in_preparation' | 'ready'
+  ) => {
+    const nowIso = new Date().toISOString();
+    const kitchenPatch: Record<string, any> = {
+      operationalStatus: nextStatus,
+      updatedAt: nowIso,
+    };
+    if (nextStatus === 'in_preparation') kitchenPatch.startedAt = nowIso;
+    if (nextStatus === 'ready') kitchenPatch.readyAt = nowIso;
+
+    // Cocina ONLY writes to /kitchen_orders/{orderId} (strictly isolated from /orders)
+    if (isCocina) {
+      await updateDoc(doc(db, 'kitchen_orders', orderId), sanitizeForFirestore(kitchenPatch));
+      return;
     }
 
-    if (Array.isArray(parsed.tables)) {
-      for (const tbl of parsed.tables) {
-        if (tbl.id) {
-          batch.set(doc(db, 'tables', tbl.id), tbl);
-          totalRestored++;
-        }
-      }
-    }
+    const batch = writeBatch(db);
+    batch.update(doc(db, 'kitchen_orders', orderId), sanitizeForFirestore(kitchenPatch));
+    batch.update(
+      doc(db, 'orders', orderId),
+      sanitizeForFirestore({
+        operationalStatus: nextStatus,
+        status: nextStatus === 'ready' ? 'served' : 'in_kitchen',
+        ...(nextStatus === 'in_preparation' ? { startedAt: nowIso } : { readyAt: nowIso }),
+        updatedAt: nowIso,
+      })
+    );
+    await batch.commit();
 
-    if (Array.isArray(parsed.inventory)) {
-      for (const inv of parsed.inventory) {
-        if (inv.id) {
-          batch.set(doc(db, 'inventory_items', inv.id), inv);
-          totalRestored++;
-        }
-      }
+    const target = orders.find(o => o.id === orderId);
+    if (target?.publicTrackingCode && currentUser) {
+      const token = await currentUser.getIdToken();
+      fetch(`/api/public/pending-orders/${target.publicTrackingCode}/status`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ operationalStatus: nextStatus }),
+      }).catch(() => {});
     }
+  };
 
-    if (Array.isArray(parsed.recipes)) {
-      for (const rec of parsed.recipes) {
-        if (rec.id) {
-          batch.set(doc(db, 'recipes', rec.id), rec);
-          totalRestored++;
-        }
-      }
+  const markOrderDelivered = async (orderId: string) => {
+    const target = orders.find(o => o.id === orderId);
+    if (!target) return;
+    const nowIso = new Date().toISOString();
+    const finStatus = resolveFinancialStatus(target);
+
+    const batch = writeBatch(db);
+    batch.update(
+      doc(db, 'orders', orderId),
+      sanitizeForFirestore({
+        operationalStatus: 'delivered',
+        status: finStatus === 'paid' ? 'completed' : 'served',
+        deliveredAt: nowIso,
+        updatedAt: nowIso,
+      })
+    );
+    batch.set(
+      doc(db, 'kitchen_orders', orderId),
+      sanitizeForFirestore({
+        operationalStatus: 'delivered',
+        updatedAt: nowIso,
+      }),
+      { merge: true }
+    );
+
+    if (target.serviceType === 'mesa' && target.tableId && finStatus === 'paid') {
+      batch.update(doc(db, 'tables', target.tableId), {
+        status: 'libre',
+        currentOrderId: null,
+        updatedAt: nowIso,
+      });
     }
-
-    // Create an audit log record for the data restoration
-    const audId = `aud_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-    const audRef = doc(db, 'audit_logs', audId);
-    batch.set(audRef, {
-      id: audId,
-      action: 'data_restore',
-      collection: 'cash_registers',
-      documentId: cashRegister.id,
-      reason: 'Restauración de respaldo general de datos',
-      performedBy: appUser?.displayName || currentUser?.email || 'Administrador',
-      performedByUid: currentUser?.uid || '',
-      performedByEmail: currentUser?.email || '',
-      timestamp: nowIso,
-      details: `Restauración ejecutada exitosamente: ${totalRestored} registros importados desde archivo exportado el ${parsed.exportedAt || 'fecha desconocida'}.`,
-    });
 
     await batch.commit();
 
-    return {
-      success: true,
-      message: `Restauración completada con éxito. Se importaron ${totalRestored} registros del sistema.`,
-      count: totalRestored,
+    if (target.publicTrackingCode && currentUser) {
+      const token = await currentUser.getIdToken();
+      fetch(`/api/public/pending-orders/${target.publicTrackingCode}/status`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ operationalStatus: 'delivered' }),
+      }).catch(() => {});
+    }
+  };
+
+  const updateOrderStatus = async (orderId: string, status: OrderStatus) => {
+    if (status === 'in_kitchen') {
+      await authorizeOrderToKitchen(orderId);
+      return;
+    }
+    if (status === 'served') {
+      await updateKitchenOrderStatus(orderId, 'ready');
+      return;
+    }
+    if (status === 'completed') {
+      await markOrderDelivered(orderId);
+      return;
+    }
+    await updateDoc(doc(db, 'orders', orderId), {
+      status,
+      updatedAt: new Date().toISOString(),
+    });
+  };
+
+  // ------------------------------------------------------------------------
+  // TABLE OPERATIONS: TRANSFER, MERGE, SPLIT BILL
+  // ------------------------------------------------------------------------
+  const transferTableOrder = async (
+    orderId: string,
+    targetTableId: string
+  ): Promise<{ success: boolean; error?: string }> => {
+    const order = orders.find(o => o.id === orderId);
+    const targetTable = tables.find(t => t.id === targetTableId);
+    if (!order || !targetTable) return { success: false, error: 'Orden o mesa destino no válida.' };
+    if (targetTable.status !== 'libre') {
+      return { success: false, error: `La mesa ${targetTable.name} ya está ocupada.` };
+    }
+
+    const nowIso = new Date().toISOString();
+    const batch = writeBatch(db);
+    if (order.tableId) {
+      batch.update(doc(db, 'tables', order.tableId), {
+        status: 'libre',
+        currentOrderId: null,
+        updatedAt: nowIso,
+      });
+    }
+    batch.update(doc(db, 'tables', targetTable.id), {
+      status: 'activa',
+      currentOrderId: order.id,
+      updatedAt: nowIso,
+    });
+    batch.update(doc(db, 'orders', order.id), {
+      tableId: targetTable.id,
+      tableName: targetTable.name,
+      updatedAt: nowIso,
+    });
+    batch.set(
+      doc(db, 'kitchen_orders', order.id),
+      { tableName: targetTable.name, updatedAt: nowIso },
+      { merge: true }
+    );
+    await batch.commit();
+    return { success: true };
+  };
+
+  const mergeTableOrders = async (
+    sourceOrderId: string,
+    targetOrderId: string
+  ): Promise<{ success: boolean; error?: string }> => {
+    if (sourceOrderId === targetOrderId) {
+      return { success: false, error: 'Seleccione dos órdenes distintas.' };
+    }
+    const source = orders.find(o => o.id === sourceOrderId);
+    const target = orders.find(o => o.id === targetOrderId);
+    if (!source || !target) return { success: false, error: 'Órdenes no encontradas.' };
+    if (resolveFinancialStatus(source) === 'paid' || resolveFinancialStatus(target) === 'paid') {
+      return { success: false, error: 'No se pueden fusionar órdenes ya pagadas.' };
+    }
+
+    const nowIso = new Date().toISOString();
+    const mergedItems = [...target.items, ...source.items];
+    const recalculated = recalculateDraft({
+      ...target,
+      items: mergedItems,
+      observations: [target.observations, source.observations].filter(Boolean).join(' | ') || undefined,
+      updatedAt: nowIso,
+    });
+
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'orders', target.id), sanitizeForFirestore(recalculated), { merge: true });
+    batch.set(
+      doc(db, 'kitchen_orders', target.id),
+      sanitizeForFirestore(buildKitchenProjection(recalculated, resolveOperationalStatus(recalculated))),
+      { merge: true }
+    );
+    batch.update(doc(db, 'orders', source.id), {
+      status: 'cancelled',
+      operationalStatus: 'cancelled',
+      cancelReason: `Fusionada con orden ${target.orderNumber}`,
+      cancelledAt: nowIso,
+      cancelledBy: getActorName(),
+      updatedAt: nowIso,
+    });
+    batch.set(
+      doc(db, 'kitchen_orders', source.id),
+      { operationalStatus: 'cancelled', updatedAt: nowIso },
+      { merge: true }
+    );
+    if (source.tableId) {
+      batch.update(doc(db, 'tables', source.tableId), {
+        status: 'libre',
+        currentOrderId: null,
+        updatedAt: nowIso,
+      });
+    }
+    await batch.commit();
+    return { success: true };
+  };
+
+  const splitOrderItems = async (
+    orderId: string,
+    splitSelections: Array<{ lineItemId: string; quantity: number }>
+  ): Promise<{ success: boolean; newOrder?: RestaurantOrder; error?: string }> => {
+    const source = orders.find(o => o.id === orderId);
+    if (!source) return { success: false, error: 'Orden original no encontrada.' };
+    if (resolveFinancialStatus(source) === 'paid') {
+      return { success: false, error: 'No se puede dividir una orden ya pagada.' };
+    }
+
+    const splitItems: OrderLineItem[] = [];
+    const remainingItems: OrderLineItem[] = [];
+
+    for (const item of source.items) {
+      const sel = splitSelections.find(s => s.lineItemId === item.id);
+      const splitQty = sel ? Math.min(Math.max(0, Math.floor(sel.quantity)), item.quantity) : 0;
+      const remQty = item.quantity - splitQty;
+      const origDeducted = Number(item.deductedQuantity || 0);
+      const splitDeducted = Math.min(origDeducted, splitQty);
+      const remDeducted = Math.max(0, origDeducted - splitDeducted);
+
+      if (splitQty > 0) {
+        splitItems.push({
+          ...item,
+          id: `line_sp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          quantity: splitQty,
+          subtotal: splitQty * item.price,
+          deductedQuantity: splitDeducted,
+        });
+      }
+      if (remQty > 0) {
+        remainingItems.push({
+          ...item,
+          quantity: remQty,
+          subtotal: remQty * item.price,
+          deductedQuantity: remDeducted,
+        });
+      }
+    }
+
+    if (splitItems.length === 0 || remainingItems.length === 0) {
+      return {
+        success: false,
+        error: 'Seleccione una parte de los platillos (deben quedar ítems en ambas cuentas).',
+      };
+    }
+
+    const nowIso = new Date().toISOString();
+    const updatedSource = recalculateDraft({ ...source, items: remainingItems, updatedAt: nowIso });
+    const newSplitOrder = recalculateDraft({
+      ...source,
+      id: `ord_sp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      orderNumber: `${source.orderNumber}-B`,
+      items: splitItems,
+      paidAmount: 0,
+      financialStatus: 'unpaid',
+      paymentStatus: 'unpaid',
+      splitFromOrderId: source.id,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'orders', updatedSource.id), sanitizeForFirestore(updatedSource), {
+      merge: true,
+    });
+    batch.set(doc(db, 'orders', newSplitOrder.id), sanitizeForFirestore(newSplitOrder));
+    await batch.commit();
+    return { success: true, newOrder: newSplitOrder };
+  };
+
+  // ------------------------------------------------------------------------
+  // ACCEPT / REJECT PUBLIC QR & EXPRÉS ORDERS (Reception Gatekeeper)
+  // ------------------------------------------------------------------------
+  const acceptPublicOrder = async (
+    trackingCode: string
+  ): Promise<{ success: boolean; order?: RestaurantOrder; error?: string }> => {
+    const pub = pendingPublicOrders.find(p => p.trackingCode === trackingCode);
+    if (!pub) return { success: false, error: 'Pedido público no encontrado.' };
+
+    const nowIso = new Date().toISOString();
+    const newOrder: RestaurantOrder = {
+      id: `ord_pub_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      orderNumber: pub.orderNumber,
+      serviceType: pub.serviceType,
+      tableId: pub.tableId,
+      tableName: pub.tableName,
+      items: pub.items.map(it => ({
+        id: it.id,
+        productId: it.productId,
+        name: it.name,
+        price: it.price,
+        quantity: it.quantity,
+        isCasado: Boolean(it.protein),
+        selectedProtein: it.protein,
+        notes: it.notes,
+        subtotal: it.subtotal,
+        deductedQuantity: 0,
+      })),
+      status: 'in_kitchen',
+      operationalStatus: 'authorized',
+      financialStatus: 'unpaid',
+      paymentStatus: 'unpaid',
+      paidAmount: 0,
+      subtotal: pub.subtotal,
+      serviceCharge: pub.serviceCharge,
+      deliveryFee: pub.deliveryFee,
+      total: pub.total,
+      observations: pub.observations,
+      deliveryDetails: pub.deliveryDetails,
+      source: pub.source,
+      publicTrackingCode: pub.trackingCode,
+      operationalDate: getCostaRicaDateString(),
+      authorizedAt: nowIso,
+      createdBy: `Recepción (${getActorName()})`,
+      createdAt: pub.createdAt || nowIso,
+      updatedAt: nowIso,
     };
+
+    if (restaurantConfig.inventoryDeductionTrigger === 'kitchen_auth') {
+      newOrder.items = await deductInventoryDeltaForOrder(newOrder);
+      newOrder.inventoryDeducted = true;
+      newOrder.inventoryDeductedAt = nowIso;
+    }
+
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'orders', newOrder.id), sanitizeForFirestore(newOrder));
+    batch.set(
+      doc(db, 'kitchen_orders', newOrder.id),
+      sanitizeForFirestore(buildKitchenProjection(newOrder, 'authorized'))
+    );
+    if (newOrder.tableId) {
+      batch.update(doc(db, 'tables', newOrder.tableId), {
+        status: 'activa',
+        currentOrderId: newOrder.id,
+        updatedAt: nowIso,
+      });
+    }
+    await batch.commit();
+
+    if (currentUser) {
+      const token = await currentUser.getIdToken();
+      await fetch(`/api/public/pending-orders/${trackingCode}/status`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ operationalStatus: 'authorized', syncedToPos: true }),
+      }).catch(() => {});
+    }
+
+    setPendingPublicOrders(prev => prev.filter(p => p.trackingCode !== trackingCode));
+    return { success: true, order: newOrder };
+  };
+
+  const rejectPublicOrder = async (trackingCode: string) => {
+    if (currentUser) {
+      const token = await currentUser.getIdToken();
+      await fetch(`/api/public/pending-orders/${trackingCode}/status`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ operationalStatus: 'cancelled', syncedToPos: true }),
+      }).catch(() => {});
+    }
+    setPendingPublicOrders(prev => prev.filter(p => p.trackingCode !== trackingCode));
+  };
+
+  // ------------------------------------------------------------------------
+  // ORDER CANCELLATION (ADMIN ONLY, EXPLICIT INVENTORY DISPOSITION)
+  // ------------------------------------------------------------------------
+  const cancelOrder = async (
+    orderId: string,
+    reason: string,
+    inventoryDisposition: 'restored' | 'waste' | 'none' = 'none'
+  ) => {
+    if (!isAdmin) throw new Error('Solo el administrador puede anular órdenes.');
+    const order = orders.find(o => o.id === orderId);
+    if (!order) throw new Error('Orden no encontrada.');
+    if (order.status === 'cancelled') return;
+
+    const nowIso = new Date().toISOString();
+    const wasPaid = resolveFinancialStatus(order) === 'paid' || (order.paidAmount || 0) > 0;
+
+    // 1. Update order & kitchen projection & free table
+    const batch = writeBatch(db);
+    batch.update(
+      doc(db, 'orders', orderId),
+      sanitizeForFirestore({
+        status: 'cancelled',
+        operationalStatus: 'cancelled',
+        financialStatus: wasPaid ? 'refunded' : 'unpaid',
+        paymentStatus: wasPaid ? 'refunded' : 'unpaid',
+        cancelReason: reason,
+        inventoryDisposition,
+        cancelledAt: nowIso,
+        cancelledBy: getActorName(),
+        updatedAt: nowIso,
+      })
+    );
+    batch.set(
+      doc(db, 'kitchen_orders', orderId),
+      { operationalStatus: 'cancelled', updatedAt: nowIso },
+      { merge: true }
+    );
+    if (order.tableId) {
+      batch.update(doc(db, 'tables', order.tableId), {
+        status: 'libre',
+        currentOrderId: null,
+        updatedAt: nowIso,
+      });
+    }
+
+    // 2. Refund confirmed payments linked to this order if any
+    const orderPayments = payments.filter(p => p.orderId === orderId && p.status === 'confirmed');
+    let cashToRefund = 0;
+    for (const p of orderPayments) {
+      batch.update(
+        doc(db, 'payments', p.id),
+        sanitizeForFirestore({
+          status: 'refunded',
+          refundedAt: nowIso,
+          refundedBy: getActorName(),
+          refundReason: reason,
+        })
+      );
+      if (p.method === 'efectivo') cashToRefund += p.amount;
+    }
+
+    if (cashToRefund === 0 && wasPaid && order.paymentMethod === 'efectivo') {
+      cashToRefund = order.total;
+    }
+
+    if (cashToRefund > 0 && activeCashRegister) {
+      const nextRefunds = (activeCashRegister.cashRefunds || 0) + cashToRefund;
+      const nextExpected = calculateExpectedCash({
+        ...activeCashRegister,
+        cashRefunds: nextRefunds,
+      });
+      batch.update(doc(db, 'cash_registers', activeCashRegister.id), {
+        cashRefunds: nextRefunds,
+        expectedCash: nextExpected,
+      });
+      const movId = `cm_ref_${orderId}_${Date.now().toString(36)}`;
+      batch.set(
+        doc(db, 'cash_movements', movId),
+        sanitizeForFirestore({
+          id: movId,
+          registerId: activeCashRegister.id,
+          type: 'refund',
+          amount: cashToRefund,
+          paymentMethod: 'efectivo',
+          referenceId: orderId,
+          description: `Devolución por anulación ${order.orderNumber}: ${reason}`,
+          performedBy: getActorName(),
+          createdAt: nowIso,
+        })
+      );
+    }
+
+    // 3. Explicit Inventory Disposition (NEVER blindly return cooked food to stock!)
+    if (order.inventoryDeducted && inventoryDisposition !== 'none') {
+      for (const item of order.items) {
+        const deductedUnits = Number(item.deductedQuantity || item.quantity || 0);
+        if (deductedUnits <= 0) continue;
+        const rec = recipes.find(
+          r => r.productId === item.productId && (!r.protein || r.protein === item.selectedProtein)
+        );
+        if (!rec || !rec.autoDeductEnabled) continue;
+
+        for (const ing of rec.ingredients) {
+          const invItem = inventory.find(i => i.id === ing.itemId);
+          if (!invItem) continue;
+          const calc = calculateIngredientConsumption(
+            deductedUnits,
+            rec.yieldPortions || 1,
+            ing.quantity,
+            ing.unit,
+            invItem.unit
+          );
+          if (!calc.compatible || calc.deductedQty <= 0) continue;
+
+          const movId = `inv_can_${orderId}_${invItem.id}_${Date.now().toString(36)}`;
+          if (inventoryDisposition === 'restored') {
+            batch.update(doc(db, 'inventory_items', invItem.id), {
+              currentStock: increment(calc.deductedQty),
+              updatedAt: nowIso,
+            });
+            batch.set(
+              doc(db, 'inventory_movements', movId),
+              sanitizeForFirestore({
+                id: movId,
+                itemId: invItem.id,
+                itemName: invItem.name,
+                type: 'return',
+                quantity: calc.deductedQty,
+                previousStock: invItem.currentStock,
+                newStock: Math.round((invItem.currentStock + calc.deductedQty) * 1000) / 1000,
+                reason: `Restitución por anulación sin preparar (${order.orderNumber})`,
+                referenceId: orderId,
+                performedBy: getActorName(),
+                createdAt: nowIso,
+              })
+            );
+          } else if (inventoryDisposition === 'waste') {
+            batch.set(
+              doc(db, 'inventory_movements', movId),
+              sanitizeForFirestore({
+                id: movId,
+                itemId: invItem.id,
+                itemName: invItem.name,
+                type: 'waste',
+                quantity: calc.deductedQty,
+                previousStock: invItem.currentStock,
+                newStock: invItem.currentStock,
+                reason: `Merma por anulación de orden preparada (${order.orderNumber}): ${reason}`,
+                referenceId: orderId,
+                performedBy: getActorName(),
+                createdAt: nowIso,
+              })
+            );
+          }
+        }
+      }
+    }
+
+    await batch.commit();
+    await addAuditLog(
+      'cancel_order',
+      'orders',
+      orderId,
+      reason,
+      `Orden ${order.orderNumber} anulada. Inventario: ${inventoryDisposition}. Reembolso efectivo: ₡${cashToRefund}.`
+    );
+  };
+
+  // ------------------------------------------------------------------------
+  // PERSISTENT PAYMENTS (SINGLE / MIXED / PARTIAL) + EXPLICIT REGISTER CHECK
+  // ------------------------------------------------------------------------
+  const recordOrderPayment = async (
+    orderId: string,
+    entries: PaymentEntryInput[]
+  ): Promise<{
+    success: boolean;
+    change?: number;
+    payments?: PaymentRecord[];
+    error?: string;
+  }> => {
+    if (!hasOpenCashRegister || !activeCashRegister) {
+      return {
+        success: false,
+        error: 'La caja está cerrada. Debe abrir un turno de caja antes de registrar cobros.',
+      };
+    }
+
+    const order = orders.find(o => o.id === orderId) || (currentOrder?.id === orderId ? currentOrder : null);
+    if (!order) return { success: false, error: 'Orden no encontrada.' };
+    if (order.status === 'cancelled') {
+      return { success: false, error: 'No se puede cobrar una orden anulada.' };
+    }
+
+    const currentFin = resolveFinancialStatus(order);
+    if (currentFin === 'paid') {
+      return { success: false, error: 'Esta orden ya fue cobrada en su totalidad.' };
+    }
+
+    if (!entries || entries.length === 0) {
+      return { success: false, error: 'Debe especificar al menos un método de pago.' };
+    }
+
+    const alreadyPaid = Number(order.paidAmount || 0);
+    const remainingDue = Math.max(0, Math.round(order.total - alreadyPaid));
+
+    let totalApplied = 0;
+    let totalChange = 0;
+
+    for (const entry of entries) {
+      const amt = Math.round(Number(entry.amount) || 0);
+      if (amt <= 0) {
+        return { success: false, error: 'Todos los montos de pago deben ser mayores a ₡0.' };
+      }
+      if (entry.method === 'sinpe' && entry.sinpeReference?.trim()) {
+        const cleanRef = entry.sinpeReference.trim().toLowerCase();
+        const duplicate = payments.find(
+          p => p.status === 'confirmed' && p.sinpeReference?.trim().toLowerCase() === cleanRef
+        );
+        if (duplicate) {
+          return {
+            success: false,
+            error: `El comprobante SINPE "${entry.sinpeReference.trim()}" ya fue registrado en la orden ${duplicate.orderNumber}.`,
+          };
+        }
+      }
+      if (entry.method === 'efectivo' && entry.receivedCash !== undefined) {
+        if (entry.receivedCash < amt) {
+          return {
+            success: false,
+            error: 'El efectivo recibido es menor al monto a aplicar en efectivo.',
+          };
+        }
+        totalChange += Math.round(entry.receivedCash - amt);
+      }
+      totalApplied += amt;
+    }
+
+    if (totalApplied > remainingDue) {
+      return {
+        success: false,
+        error: `El monto total aplicado (₡${totalApplied}) supera el saldo pendiente (₡${remainingDue}).`,
+      };
+    }
+
+    const nowIso = new Date().toISOString();
+    const newPaidTotal = alreadyPaid + totalApplied;
+    const isNowFullyPaid = newPaidTotal >= order.total;
+    const nextFinStatus: FinancialOrderStatus = isNowFullyPaid ? 'paid' : 'partially_paid';
+
+    const usedMethods = new Set<string>(entries.map(e => e.method));
+    const priorPayments = payments.filter(p => p.orderId === orderId && p.status === 'confirmed');
+    priorPayments.forEach(p => usedMethods.add(p.method));
+    const finalPaymentMethod: PaymentMethod =
+      usedMethods.size > 1 ? 'mixto' : (entries[0].method as PaymentMethod);
+
+    const attemptKey = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+    const createdPayments: PaymentRecord[] = entries.map((e, idx) => {
+      const idempKey = buildDeterministicPaymentId(orderId, attemptKey, idx, e.method);
+      return {
+        id: idempKey,
+        orderId,
+        orderNumber: order.orderNumber,
+        registerId: activeCashRegister.id,
+        amount: Math.round(e.amount),
+        method: e.method,
+        status: 'confirmed',
+        receivedCash: e.receivedCash,
+        changeGiven:
+          e.method === 'efectivo' && e.receivedCash !== undefined
+            ? Math.max(0, Math.round(e.receivedCash - e.amount))
+            : undefined,
+        sinpeReference: e.sinpeReference?.trim() || undefined,
+        cardAuthCode: e.cardAuthCode?.trim() || undefined,
+        idempotencyKey: idempKey,
+        performedBy: getActorName(),
+        performedByUid: currentUser?.uid,
+        createdAt: nowIso,
+      };
+    });
+
+    if (!isOnline) {
+      await saveOfflineMutation({
+        id: `mut_pay_${orderId}_${attemptKey}`,
+        collection: 'orders',
+        docId: orderId,
+        type: 'payment_transaction',
+        payload: {
+          orderId,
+          registerId: activeCashRegister.id,
+          payments: createdPayments,
+          finalPaymentMethod,
+          nextFinStatus,
+          newPaidTotal,
+        },
+        userId: currentUser?.uid,
+        requiresReconciliation: true,
+        createdAt: nowIso,
+      });
+      setPendingOfflineCount(await getOfflinePendingCount());
+      return {
+        success: true,
+        change: totalChange,
+        payments: createdPayments,
+      };
+    }
+
+    try {
+      let txFullyPaid = isNowFullyPaid;
+
+      await runTransaction(db, async tx => {
+        const orderRef = doc(db, 'orders', orderId);
+        const regRef = doc(db, 'cash_registers', activeCashRegister.id);
+        const payRefs = createdPayments.map(p => doc(db, 'payments', p.id));
+
+        const [orderSnap, regSnap, ...paySnaps] = await Promise.all([
+          tx.get(orderRef),
+          tx.get(regRef),
+          ...payRefs.map(ref => tx.get(ref)),
+        ]);
+
+        const liveOrder = orderSnap.exists() ? (orderSnap.data() as RestaurantOrder) : order;
+        const regData = regSnap.exists() ? (regSnap.data() as CashRegister) : undefined;
+        const existingPayIds = new Set<string>();
+        paySnaps.forEach((snap, idx) => {
+          if (snap.exists()) existingPayIds.add(createdPayments[idx].id);
+        });
+
+        const evaluation = evaluateTransactionalPayment({
+          liveOrder,
+          registerStatus: regData?.status,
+          existingPaymentIds: existingPayIds,
+          incomingPayments: createdPayments,
+        });
+
+        if (!evaluation.ok) {
+          throw new Error(evaluation.error || 'No se pudo validar el cobro de forma atómica.');
+        }
+
+        txFullyPaid = evaluation.isNowFullyPaid;
+
+        if (evaluation.idempotentReplay || !regData) {
+          return;
+        }
+
+        for (const pay of evaluation.paymentsToWrite) {
+          tx.set(doc(db, 'payments', pay.id), sanitizeForFirestore(pay));
+
+          const movId = `cm_sale_${pay.id}`;
+          tx.set(
+            doc(db, 'cash_movements', movId),
+            sanitizeForFirestore({
+              id: movId,
+              registerId: activeCashRegister.id,
+              type: 'sale',
+              amount: pay.amount,
+              paymentMethod: pay.method,
+              referenceId: orderId,
+              description: `Cobro ${liveOrder.orderNumber} (${pay.method.toUpperCase()})${pay.sinpeReference ? ` Ref:${pay.sinpeReference}` : ''}`,
+              performedBy: getActorName(),
+              createdAt: nowIso,
+            })
+          );
+        }
+
+        const nextReg: CashRegister = {
+          ...regData,
+          cashSales: (regData.cashSales || 0) + evaluation.addCash,
+          sinpeSales: (regData.sinpeSales || 0) + evaluation.addSinpe,
+          cardSales: (regData.cardSales || 0) + evaluation.addCard,
+        };
+        const nextExpected = calculateExpectedCash(nextReg);
+
+        tx.update(regRef, {
+          cashSales: nextReg.cashSales,
+          sinpeSales: nextReg.sinpeSales,
+          cardSales: nextReg.cardSales,
+          expectedCash: nextExpected,
+        });
+
+        // CRITICAL: Paying an order NEVER silently marks kitchen operationalStatus as 'delivered'!
+        const currentOp = resolveOperationalStatus(liveOrder);
+        tx.set(
+          orderRef,
+          sanitizeForFirestore({
+            ...liveOrder,
+            paidAmount: evaluation.nextPaidTotal,
+            financialStatus: evaluation.nextFinStatus,
+            paymentStatus: evaluation.nextFinStatus,
+            paymentMethod: finalPaymentMethod,
+            paidAt: evaluation.isNowFullyPaid ? nowIso : liveOrder.paidAt,
+            status: toLegacyOrderStatus(currentOp, evaluation.nextFinStatus),
+            updatedAt: nowIso,
+          }),
+          { merge: true }
+        );
+
+        // Free table ONLY if fully paid AND already delivered (or if ventana/expres)
+        if (evaluation.isNowFullyPaid && liveOrder.serviceType === 'mesa' && liveOrder.tableId) {
+          tx.update(doc(db, 'tables', liveOrder.tableId), {
+            status: currentOp === 'delivered' ? 'libre' : 'activa',
+            currentOrderId: currentOp === 'delivered' ? null : orderId,
+            updatedAt: nowIso,
+          });
+        }
+      });
+
+      // Trigger inventory deduction if configured for payment moment
+      if (txFullyPaid && restaurantConfig.inventoryDeductionTrigger === 'payment') {
+        const updatedItems = await deductInventoryDeltaForOrder(order);
+        await updateDoc(doc(db, 'orders', orderId), {
+          items: sanitizeForFirestore(updatedItems),
+          inventoryDeducted: true,
+          inventoryDeductedAt: nowIso,
+        });
+      }
+
+      return { success: true, change: totalChange, payments: createdPayments };
+    } catch (error: any) {
+      return { success: false, error: error?.message || 'Error procesando el cobro.' };
+    }
+  };
+
+  const completeOrderPayment = async (
+    orderId: string,
+    method: PaymentMethod,
+    receivedCash?: number,
+    meta?: { sinpeReference?: string; cardAuthCode?: string }
+  ): Promise<{ success: boolean; change?: number; error?: string }> => {
+    const order = orders.find(o => o.id === orderId) || (currentOrder?.id === orderId ? currentOrder : null);
+    if (!order) return { success: false, error: 'Orden no encontrada.' };
+    const remaining = Math.max(0, Math.round(order.total - (order.paidAmount || 0)));
+    const resolvedMethod = method === 'mixto' ? 'efectivo' : method;
+    return recordOrderPayment(orderId, [
+      {
+        method: resolvedMethod,
+        amount: remaining,
+        receivedCash,
+        sinpeReference: meta?.sinpeReference,
+        cardAuthCode: meta?.cardAuthCode,
+      },
+    ]);
+  };
+
+  const refundPayment = async (
+    paymentId: string,
+    reason: string
+  ): Promise<{ success: boolean; error?: string }> => {
+    if (!isAdmin) return { success: false, error: 'Solo un administrador puede emitir reembolsos.' };
+    const pay = payments.find(p => p.id === paymentId);
+    if (!pay) return { success: false, error: 'Pago no encontrado.' };
+    if (pay.status !== 'confirmed') return { success: false, error: 'Este pago ya fue revertido.' };
+    if (pay.method === 'efectivo' && !activeCashRegister) {
+      return {
+        success: false,
+        error: 'Debe haber una caja abierta para registrar un reembolso en efectivo.',
+      };
+    }
+
+    const nowIso = new Date().toISOString();
+    const batch = writeBatch(db);
+    batch.update(
+      doc(db, 'payments', paymentId),
+      sanitizeForFirestore({
+        status: 'refunded',
+        refundedAt: nowIso,
+        refundedBy: getActorName(),
+        refundReason: reason,
+      })
+    );
+
+    const order = orders.find(o => o.id === pay.orderId);
+    if (order) {
+      const nextPaid = Math.max(0, (order.paidAmount || order.total) - pay.amount);
+      const nextFin: FinancialOrderStatus =
+        nextPaid <= 0 ? 'refunded' : nextPaid < order.total ? 'partially_paid' : 'paid';
+      batch.update(doc(db, 'orders', order.id), {
+        paidAmount: nextPaid,
+        financialStatus: nextFin,
+        paymentStatus: nextFin,
+        updatedAt: nowIso,
+      });
+    }
+
+    if (pay.method === 'efectivo' && activeCashRegister) {
+      const nextRefunds = (activeCashRegister.cashRefunds || 0) + pay.amount;
+      batch.update(doc(db, 'cash_registers', activeCashRegister.id), {
+        cashRefunds: nextRefunds,
+        expectedCash: calculateExpectedCash({ ...activeCashRegister, cashRefunds: nextRefunds }),
+      });
+      const movId = `cm_ref_${paymentId}`;
+      batch.set(
+        doc(db, 'cash_movements', movId),
+        sanitizeForFirestore({
+          id: movId,
+          registerId: activeCashRegister.id,
+          type: 'refund',
+          amount: pay.amount,
+          paymentMethod: 'efectivo',
+          referenceId: pay.orderId,
+          description: `Reembolso efectivo ${pay.orderNumber}: ${reason}`,
+          performedBy: getActorName(),
+          createdAt: nowIso,
+        })
+      );
+    }
+
+    await batch.commit();
+    await addAuditLog('refund_payment', 'payments', paymentId, reason, `Monto: ₡${pay.amount}`);
+    return { success: true };
+  };
+
+  // ------------------------------------------------------------------------
+  // EXPLICIT CASH REGISTER OPERATIONS (OPEN / CLOSE / REOPEN / DEPOSIT / WITHDRAWAL)
+  // ------------------------------------------------------------------------
+  const openNewDayRegister = async (
+    initialFloat: number,
+    denominations?: DenominationCount[]
+  ) => {
+    const cleanFloat = Math.round(Number(initialFloat) || 0);
+    if (cleanFloat < 0) throw new Error('El fondo inicial no puede ser negativo.');
+
+    const today = getCostaRicaDateString();
+    const alreadyOpenToday = cashRegistersHistory.find(
+      r => r.date === today && r.status === 'open'
+    );
+    if (alreadyOpenToday) {
+      throw new Error('Ya existe un turno de caja abierto para hoy.');
+    }
+
+    const nowIso = new Date().toISOString();
+    const regId = `reg_${today}_${Date.now().toString(36).slice(-4)}`;
+    const newReg: CashRegister = {
+      id: regId,
+      date: today,
+      status: 'open',
+      openedAt: nowIso,
+      openedBy: getActorName(),
+      initialCash: cleanFloat,
+      openingDenominations: denominations,
+      cashSales: 0,
+      sinpeSales: 0,
+      cardSales: 0,
+      cashDeposits: 0,
+      cashWithdrawals: 0,
+      cashRefunds: 0,
+      cashPurchases: 0,
+      cashExpenses: 0,
+      expectedCash: cleanFloat,
+    };
+
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'cash_registers', regId), sanitizeForFirestore(newReg));
+    const movId = `cm_open_${regId}`;
+    batch.set(
+      doc(db, 'cash_movements', movId),
+      sanitizeForFirestore({
+        id: movId,
+        registerId: regId,
+        type: 'initial_float',
+        amount: cleanFloat,
+        paymentMethod: 'efectivo',
+        referenceId: regId,
+        description: `Apertura de caja — Fondo inicial (${today})`,
+        performedBy: getActorName(),
+        createdAt: nowIso,
+      })
+    );
+    await batch.commit();
+
+    await addAuditLog(
+      'open_register',
+      'cash_registers',
+      regId,
+      `Apertura explícita de turno con fondo ₡${cleanFloat}`
+    );
+  };
+
+  const closeCashRegister = async (
+    actualCash: number,
+    notes?: string,
+    denominations?: DenominationCount[],
+    targetRegisterId?: string
+  ): Promise<{ success: boolean; register?: CashRegister; error?: string }> => {
+    const target = targetRegisterId
+      ? cashRegistersHistory.find(r => r.id === targetRegisterId)
+      : activeCashRegister;
+
+    if (!target || target.status !== 'open') {
+      return { success: false, error: 'No hay un turno de caja abierto para cerrar.' };
+    }
+
+    const counted = Math.round(Number(actualCash) || 0);
+    if (counted < 0) {
+      return { success: false, error: 'El efectivo contado no puede ser negativo.' };
+    }
+
+    const expected = calculateExpectedCash(target);
+    const difference = Math.round(counted - expected);
+    const nowIso = new Date().toISOString();
+    const closePatch = buildCashRegisterClosePatch({
+      expectedCash: expected,
+      actualCash: counted,
+      closedAt: nowIso,
+      closedBy: getActorName(),
+      notes: notes?.trim() || target.notes,
+      closingDenominations: denominations,
+    });
+
+    const closedReg: CashRegister = {
+      ...target,
+      ...closePatch,
+      status: 'closed',
+    };
+
+    await updateDoc(doc(db, 'cash_registers', target.id), sanitizeForFirestore(closePatch));
+    await addAuditLog(
+      'close_register',
+      'cash_registers',
+      target.id,
+      notes?.trim() || 'Cierre formal de turno de caja',
+      `Esperado: ₡${expected} | Contado: ₡${counted} | Diferencia: ₡${difference}`
+    );
+
+    return { success: true, register: closedReg };
+  };
+
+  const recordPhysicalCount = async (
+    actualCash: number,
+    notes?: string,
+    denominations?: DenominationCount[]
+  ) => {
+    const res = await closeCashRegister(actualCash, notes, denominations);
+    if (!res.success) throw new Error(res.error);
+  };
+
+  const reopenCashRegister = async (registerId: string, reason: string) => {
+    if (!isAdmin) throw new Error('Solo el administrador puede reabrir una caja cerrada.');
+    if (!reason.trim()) throw new Error('Debe indicar el motivo de reapertura.');
+    const target = cashRegistersHistory.find(r => r.id === registerId);
+    if (!target) throw new Error('Caja no encontrada.');
+
+    const nowIso = new Date().toISOString();
+    await updateDoc(
+      doc(db, 'cash_registers', registerId),
+      sanitizeForFirestore({
+        status: 'open',
+        reopenedAt: nowIso,
+        reopenedBy: getActorName(),
+        reopenReason: reason.trim(),
+      })
+    );
+    await addAuditLog('reopen_register', 'cash_registers', registerId, reason.trim());
+  };
+
+  const recordCashDrawerMovement = async (
+    type: 'deposit' | 'withdrawal',
+    amount: number,
+    reason: string
+  ) => {
+    if (!isAdmin) throw new Error('Solo el administrador puede registrar ingresos o retiros de caja.');
+    if (!activeCashRegister || activeCashRegister.status !== 'open') {
+      throw new Error('Debe tener una caja abierta para registrar movimientos.');
+    }
+    const cleanAmt = Math.round(Number(amount) || 0);
+    if (cleanAmt <= 0) throw new Error('El monto debe ser mayor a ₡0.');
+    if (!reason.trim()) throw new Error('Debe indicar el motivo del movimiento.');
+
+    const nowIso = new Date().toISOString();
+    const nextReg: CashRegister = {
+      ...activeCashRegister,
+      cashDeposits:
+        (activeCashRegister.cashDeposits || 0) + (type === 'deposit' ? cleanAmt : 0),
+      cashWithdrawals:
+        (activeCashRegister.cashWithdrawals || 0) + (type === 'withdrawal' ? cleanAmt : 0),
+    };
+    const nextExpected = calculateExpectedCash(nextReg);
+
+    const batch = writeBatch(db);
+    batch.update(doc(db, 'cash_registers', activeCashRegister.id), {
+      cashDeposits: nextReg.cashDeposits,
+      cashWithdrawals: nextReg.cashWithdrawals,
+      expectedCash: nextExpected,
+    });
+    const movId = `cm_${type}_${Date.now().toString(36)}`;
+    batch.set(
+      doc(db, 'cash_movements', movId),
+      sanitizeForFirestore({
+        id: movId,
+        registerId: activeCashRegister.id,
+        type,
+        amount: cleanAmt,
+        paymentMethod: 'efectivo',
+        referenceId: activeCashRegister.id,
+        description: `${type === 'deposit' ? 'Ingreso manual' : 'Retiro de efectivo'}: ${reason.trim()}`,
+        performedBy: getActorName(),
+        createdAt: nowIso,
+      })
+    );
+    await batch.commit();
+    await addAuditLog(
+      'cash_movement',
+      'cash_registers',
+      activeCashRegister.id,
+      `${type === 'deposit' ? 'Ingreso' : 'Retiro'} ₡${cleanAmt}: ${reason.trim()}`
+    );
+  };
+
+  // ------------------------------------------------------------------------
+  // KITCHEN TICKET PRINTING
+  // ------------------------------------------------------------------------
+  const printOrderTicket = (order: RestaurantOrder) => {
+    const previousPrints = kitchenTickets.filter(t => t.orderId === order.id).length;
+    const isCopy = previousPrints > 0;
+    const ticket = createKitchenTicketFromOrder(order, isCopy, previousPrints);
+    setActiveTicketToPrint(ticket);
+    printKitchenTicket(ticket, restaurantConfig.printerWidth);
+
+    setDoc(doc(db, 'kitchen_tickets', ticket.id), sanitizeForFirestore(ticket)).catch(err =>
+      console.warn('Error guardando registro de ticket:', err)
+    );
+  };
+
+  // ------------------------------------------------------------------------
+  // RECIPES, PRODUCTS, WASTE & INVENTORY (ADMIN ONLY)
+  // ------------------------------------------------------------------------
+  const saveRecipe = async (recipe: Recipe) => {
+    if (!isAdmin) throw new Error('Solo el administrador puede guardar recetas.');
+    const nowIso = new Date().toISOString();
+    const yieldPortions = Math.max(1, Number(recipe.yieldPortions) || 1);
+
+    let totalBatchCost = 0;
+    const formulaIngredients: RecipeFormulaDoc['ingredients'] = [];
+
+    for (const ing of recipe.ingredients) {
+      const invItem = inventory.find(i => i.id === ing.itemId);
+      if (invItem) {
+        const conv = convertToInventoryUnit(ing.quantity, ing.unit, 0, invItem.unit);
+        if (conv.compatible) {
+          totalBatchCost += conv.convertedQuantity * (invItem.averageCost || invItem.lastPurchaseCost || 0);
+        }
+        formulaIngredients.push({
+          itemId: invItem.id,
+          itemName: invItem.name,
+          quantity: ing.quantity,
+          unit: ing.unit,
+          inventoryUnit: invItem.unit,
+        });
+      }
+    }
+
+    const calculatedCost = Math.round(totalBatchCost / yieldPortions);
+    const finalRecipe: Recipe = {
+      ...recipe,
+      yieldPortions,
+      calculatedCost,
+      updatedAt: nowIso,
+    };
+
+    const formulaDoc: RecipeFormulaDoc = {
+      id: recipe.id,
+      productId: recipe.productId,
+      protein: recipe.protein,
+      yieldPortions,
+      autoDeductEnabled: recipe.autoDeductEnabled,
+      ingredients: formulaIngredients,
+      updatedAt: nowIso,
+    };
+
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'recipes', recipe.id), sanitizeForFirestore(finalRecipe));
+    batch.set(doc(db, 'recipe_formulas', recipe.id), sanitizeForFirestore(formulaDoc));
+    await batch.commit();
+
+    await addAuditLog(
+      'save_recipe',
+      'recipes',
+      recipe.id,
+      `Receta guardada: ${recipe.productName} (Rendimiento: ${yieldPortions}, Costo/porción: ₡${calculatedCost})`
+    );
+  };
+
+  const toggleRecipeAutoDeduct = async (recipeId: string) => {
+    if (!isAdmin) throw new Error('Solo el administrador puede cambiar descuento automático.');
+    const rec = recipes.find(r => r.id === recipeId);
+    if (!rec) return;
+    const nextVal = !rec.autoDeductEnabled;
+    const nowIso = new Date().toISOString();
+
+    const batch = writeBatch(db);
+    batch.update(doc(db, 'recipes', recipeId), {
+      autoDeductEnabled: nextVal,
+      updatedAt: nowIso,
+    });
+    batch.set(
+      doc(db, 'recipe_formulas', recipeId),
+      { autoDeductEnabled: nextVal, updatedAt: nowIso },
+      { merge: true }
+    );
+    await batch.commit();
+    await addAuditLog(
+      'toggle_recipe_autodeduct',
+      'recipes',
+      recipeId,
+      `Descuento automático ${nextVal ? 'activado' : 'desactivado'}`
+    );
+  };
+
+  const saveProduct = async (product: ProductItem) => {
+    if (!isAdmin) throw new Error('Solo el administrador puede editar productos.');
+    const nowIso = new Date().toISOString();
+    const finalProd = { ...product, updatedAt: nowIso };
+    await setDoc(doc(db, 'products', product.id), sanitizeForFirestore(finalProd), { merge: true });
+    await addAuditLog(
+      'save_product',
+      'products',
+      product.id,
+      `Producto guardado: ${product.name} (₡${product.price})`
+    );
+  };
+
+  const registerWaste = async (
+    itemId: string,
+    quantity: number,
+    reason: string,
+    notes?: string
+  ) => {
+    if (!isAdmin) throw new Error('Solo el administrador puede registrar mermas.');
+    const item = inventory.find(i => i.id === itemId);
+    if (!item) throw new Error('Insumo no encontrado.');
+    const qty = Number(quantity);
+    if (!Number.isFinite(qty) || qty <= 0) throw new Error('Cantidad de merma inválida.');
+
+    const nowIso = new Date().toISOString();
+    const newStock = Math.max(0, Math.round((item.currentStock - qty) * 1000) / 1000);
+    const movId = `inv_waste_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+
+    const batch = writeBatch(db);
+    batch.update(doc(db, 'inventory_items', itemId), {
+      currentStock: newStock,
+      updatedAt: nowIso,
+    });
+    batch.set(
+      doc(db, 'inventory_movements', movId),
+      sanitizeForFirestore({
+        id: movId,
+        itemId,
+        itemName: item.name,
+        type: 'waste',
+        quantity: qty,
+        previousStock: item.currentStock,
+        newStock,
+        reason: notes ? `${reason} — ${notes}` : reason,
+        performedBy: getActorName(),
+        createdAt: nowIso,
+      })
+    );
+    await batch.commit();
+    await addAuditLog('waste_record', 'inventory_items', itemId, `Merma ${qty} ${item.unit}: ${reason}`);
+  };
+
+  const updateInventoryStock = async (itemId: string, newStock: number, reason: string) => {
+    if (!isAdmin) throw new Error('Solo el administrador puede ajustar el inventario.');
+    const item = inventory.find(i => i.id === itemId);
+    if (!item) throw new Error('Insumo no encontrado.');
+    if (newStock < 0) throw new Error('El stock no puede ser negativo.');
+
+    const nowIso = new Date().toISOString();
+    const movId = `inv_adj_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+
+    const batch = writeBatch(db);
+    batch.update(doc(db, 'inventory_items', itemId), {
+      currentStock: newStock,
+      updatedAt: nowIso,
+    });
+    batch.set(
+      doc(db, 'inventory_movements', movId),
+      sanitizeForFirestore({
+        id: movId,
+        itemId,
+        itemName: item.name,
+        type: 'adjustment',
+        quantity: Math.round((newStock - item.currentStock) * 1000) / 1000,
+        previousStock: item.currentStock,
+        newStock,
+        reason,
+        performedBy: getActorName(),
+        createdAt: nowIso,
+      })
+    );
+    await batch.commit();
+    await addAuditLog(
+      'inventory_adjustment',
+      'inventory_items',
+      itemId,
+      reason,
+      `Stock: ${item.currentStock} -> ${newStock} ${item.unit}`
+    );
+  };
+
+  // ------------------------------------------------------------------------
+  // SUPPLIERS & PURCHASES WITH CREDIT (CxP) & STRICT OPEN-REGISTER CHECK
+  // ------------------------------------------------------------------------
+  const saveSupplier = async (
+    supplierInput: Omit<Supplier, 'id' | 'createdAt'> & { id?: string }
+  ) => {
+    if (!isAdmin) throw new Error('Solo el administrador puede gestionar proveedores.');
+    const nowIso = new Date().toISOString();
+    const id = supplierInput.id || `sup_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const existing = suppliers.find(s => s.id === id);
+    const finalSup: Supplier = {
+      ...supplierInput,
+      id,
+      createdAt: existing?.createdAt || nowIso,
+      updatedAt: nowIso,
+    };
+    await setDoc(doc(db, 'suppliers', id), sanitizeForFirestore(finalSup), { merge: true });
+    await addAuditLog('create', 'suppliers', id, `Proveedor guardado: ${finalSup.name}`);
+  };
+
+  const addPurchase = async (
+    purchase: Omit<PurchaseRecord, 'id' | 'createdAt' | 'registeredBy'>
+  ) => {
+    if (!isAdmin) throw new Error('Solo el administrador puede registrar compras.');
+
+    if (purchase.paidFromCashRegister && (!activeCashRegister || activeCashRegister.status !== 'open')) {
+      throw new Error(
+        'No se puede descontar una compra de la caja porque no hay un turno de caja abierto.'
+      );
+    }
+
+    const nowIso = new Date().toISOString();
+    const purchaseId = `pur_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const isCredit = purchase.paymentMethod === 'credito';
+    const initialPaid = isCredit ? Number(purchase.paidAmount || 0) : purchase.total;
+    const creditStatus: PurchaseRecord['creditStatus'] = isCredit
+      ? initialPaid >= purchase.total
+        ? 'paid'
+        : initialPaid > 0
+          ? 'partial'
+          : 'pending'
+      : 'paid';
+
+    // Atomic duplicate invoice lock when vendor + purchaseNumber are present
+    const lockId = buildPurchaseInvoiceLockId(purchase.vendor, purchase.purchaseNumber);
+
+    const finalPurchase: PurchaseRecord = {
+      ...purchase,
+      id: purchaseId,
+      creditStatus,
+      paidAmount: initialPaid,
+      registeredBy: getActorName(),
+      createdAt: nowIso,
+    };
+
+    // Execute lock check, purchase write, stock updates, and cash deduction atomically in a transaction
+    const matchedLines = purchase.items.map(line => {
+      const normalizedUnit = normalizeUnitString(line.unit);
+      const invItem = line.itemId
+        ? inventory.find(i => i.id === line.itemId)
+        : inventory.find(
+            i =>
+              i.name.trim().toLowerCase() ===
+              (line.normalizedName || line.name).trim().toLowerCase()
+          );
+      return { line, normalizedUnit, invItem };
+    });
+
+    await runTransaction(db, async tx => {
+      const lockRef = lockId ? doc(db, 'purchase_invoice_locks', lockId) : null;
+      const regRef =
+        purchase.paidFromCashRegister && activeCashRegister && !isCredit
+          ? doc(db, 'cash_registers', activeCashRegister.id)
+          : null;
+
+      // All reads MUST precede writes in Firestore transactions
+      const lockSnap = lockRef ? await tx.get(lockRef) : null;
+      if (lockSnap && lockSnap.exists()) {
+        throw new Error(
+          `Factura duplicada detectada: ${purchase.vendor} #${purchase.purchaseNumber} ya fue registrada.`
+        );
+      }
+
+      const regSnap = regRef ? await tx.get(regRef) : null;
+      if (regRef && (!regSnap || !regSnap.exists() || regSnap.data()?.status !== 'open')) {
+        throw new Error('La caja fue cerrada en otro dispositivo antes de registrar la compra.');
+      }
+
+      const liveInvSnaps = new Map<string, InventoryItem>();
+      const uniqueInvIds = Array.from(
+        new Set(matchedLines.filter(m => m.invItem).map(m => m.invItem!.id))
+      );
+      for (const invId of uniqueInvIds) {
+        const snap = await tx.get(doc(db, 'inventory_items', invId));
+        if (snap.exists()) {
+          liveInvSnaps.set(invId, { id: snap.id, ...(snap.data() as Omit<InventoryItem, 'id'>) });
+        }
+      }
+
+      if (lockRef) {
+        tx.set(lockRef, {
+          vendor: purchase.vendor,
+          purchaseNumber: purchase.purchaseNumber,
+          purchaseId,
+          total: purchase.total,
+          registeredAt: nowIso,
+          registeredBy: getActorName(),
+        });
+      }
+      tx.set(doc(db, 'purchases', purchaseId), sanitizeForFirestore(finalPurchase));
+
+      for (const { line, normalizedUnit, invItem } of matchedLines) {
+        const liveInv = invItem ? liveInvSnaps.get(invItem.id) || invItem : undefined;
+        if (liveInv) {
+          const conv = convertToInventoryUnit(
+            line.quantity,
+            normalizedUnit,
+            line.unitCost || 0,
+            liveInv.unit
+          );
+          const addedQty = conv.compatible ? conv.convertedQuantity : line.quantity;
+          const unitCostInInvUnit = addedQty > 0 ? line.totalCost / addedQty : line.unitCost;
+          const nextAvgCost = calculateWeightedAverageCost(
+            liveInv.currentStock,
+            liveInv.averageCost || liveInv.lastPurchaseCost || 0,
+            addedQty,
+            unitCostInInvUnit
+          );
+          const nextStock = Math.round((liveInv.currentStock + addedQty) * 1000) / 1000;
+
+          tx.update(doc(db, 'inventory_items', liveInv.id), {
+            currentStock: nextStock,
+            averageCost: Math.round(nextAvgCost * 100) / 100,
+            lastPurchaseCost: Math.round(unitCostInInvUnit * 100) / 100,
+            updatedAt: nowIso,
+          });
+          // Update local map in case same item appears twice in one invoice
+          liveInvSnaps.set(liveInv.id, {
+            ...liveInv,
+            currentStock: nextStock,
+            averageCost: Math.round(nextAvgCost * 100) / 100,
+          });
+
+          const movId = `inv_pur_${purchaseId}_${liveInv.id}_${Math.random().toString(36).slice(2, 5)}`;
+          tx.set(
+            doc(db, 'inventory_movements', movId),
+            sanitizeForFirestore({
+              id: movId,
+              itemId: liveInv.id,
+              itemName: liveInv.name,
+              type: 'purchase',
+              quantity: addedQty,
+              previousStock: liveInv.currentStock,
+              newStock: nextStock,
+              reason: `Compra ${purchase.vendor || ''} ${purchase.purchaseNumber || ''}`.trim(),
+              referenceId: purchaseId,
+              performedBy: getActorName(),
+              createdAt: nowIso,
+            })
+          );
+        } else {
+          const newInvId = `inv_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+          tx.set(
+            doc(db, 'inventory_items', newInvId),
+            sanitizeForFirestore({
+              id: newInvId,
+              name: line.normalizedName || line.name,
+              category: 'ingredientes',
+              unit: normalizedUnit,
+              currentStock: line.quantity,
+              minStock: 2,
+              averageCost: line.unitCost,
+              lastPurchaseCost: line.unitCost,
+              updatedAt: nowIso,
+            })
+          );
+        }
+      }
+
+      if (regRef && regSnap) {
+        const regData = regSnap.data() as CashRegister;
+        const nextCashPurchases = (regData.cashPurchases || 0) + purchase.total;
+        const nextExpected = calculateExpectedCash({
+          ...regData,
+          cashPurchases: nextCashPurchases,
+        });
+        tx.update(regRef, {
+          cashPurchases: nextCashPurchases,
+          expectedCash: nextExpected,
+        });
+        const movId = `cm_pur_${purchaseId}`;
+        tx.set(
+          doc(db, 'cash_movements', movId),
+          sanitizeForFirestore({
+            id: movId,
+            registerId: regRef.id,
+            type: 'purchase',
+            amount: purchase.total,
+            paymentMethod: 'efectivo',
+            referenceId: purchaseId,
+            description: `Compra a ${purchase.vendor || 'Proveedor'} ${purchase.purchaseNumber || ''}`.trim(),
+            performedBy: getActorName(),
+            createdAt: nowIso,
+          })
+        );
+      }
+    });
+    await addAuditLog(
+      'add_purchase',
+      'purchases',
+      purchaseId,
+      `Compra registrada: ${purchase.vendor || 'Proveedor'} — ₡${purchase.total}`
+    );
+  };
+
+  const recordCreditPurchasePayment = async (
+    purchaseId: string,
+    amount: number,
+    method: 'efectivo' | 'transferencia' | 'tarjeta',
+    paidFromCashRegister: boolean,
+    notes?: string
+  ) => {
+    if (!isAdmin) throw new Error('Solo el administrador puede registrar abonos a proveedores.');
+    const pur = purchases.find(p => p.id === purchaseId);
+    if (!pur) throw new Error('Compra a crédito no encontrada.');
+
+    const cleanAmt = Math.round(Number(amount) || 0);
+    const currentPaid = Number(pur.paidAmount || 0);
+    const pendingBalance = Math.max(0, pur.total - currentPaid);
+    if (cleanAmt <= 0 || cleanAmt > pendingBalance) {
+      throw new Error(`El monto del abono debe estar entre ₡1 y ₡${pendingBalance}.`);
+    }
+    if (paidFromCashRegister && (!activeCashRegister || activeCashRegister.status !== 'open')) {
+      throw new Error('Debe haber un turno de caja abierto para pagar este abono desde caja.');
+    }
+
+    const nowIso = new Date().toISOString();
+    const nextPaid = currentPaid + cleanAmt;
+    const nextStatus: PurchaseRecord['creditStatus'] = nextPaid >= pur.total ? 'paid' : 'partial';
+    const paymentEntry: CreditPaymentEntry = {
+      id: `cpay_${Date.now().toString(36)}`,
+      amount: cleanAmt,
+      paymentMethod: method,
+      paidFromCashRegister,
+      paidAt: nowIso,
+      paidBy: getActorName(),
+      notes: notes?.trim() || undefined,
+    };
+
+    const batch = writeBatch(db);
+    batch.update(
+      doc(db, 'purchases', purchaseId),
+      sanitizeForFirestore({
+        paidAmount: nextPaid,
+        creditStatus: nextStatus,
+        creditPayments: [...(pur.creditPayments || []), paymentEntry],
+      })
+    );
+
+    if (paidFromCashRegister && activeCashRegister) {
+      const nextCashPurchases = (activeCashRegister.cashPurchases || 0) + cleanAmt;
+      batch.update(doc(db, 'cash_registers', activeCashRegister.id), {
+        cashPurchases: nextCashPurchases,
+        expectedCash: calculateExpectedCash({
+          ...activeCashRegister,
+          cashPurchases: nextCashPurchases,
+        }),
+      });
+      const movId = `cm_cpay_${paymentEntry.id}`;
+      batch.set(
+        doc(db, 'cash_movements', movId),
+        sanitizeForFirestore({
+          id: movId,
+          registerId: activeCashRegister.id,
+          type: 'purchase',
+          amount: cleanAmt,
+          paymentMethod: 'efectivo',
+          referenceId: purchaseId,
+          description: `Abono CxP ${pur.vendor || ''} ${pur.purchaseNumber || ''}`.trim(),
+          performedBy: getActorName(),
+          createdAt: nowIso,
+        })
+      );
+    }
+
+    await batch.commit();
+    await addAuditLog(
+      'credit_payment',
+      'purchases',
+      purchaseId,
+      `Abono CxP ₡${cleanAmt} a ${pur.vendor || 'Proveedor'} (Estado: ${nextStatus})`
+    );
+  };
+
+  // ------------------------------------------------------------------------
+  // OPERATING EXPENSES
+  // ------------------------------------------------------------------------
+  const addExpense = async (expense: Omit<OperatingExpense, 'id' | 'createdAt' | 'status'>) => {
+    if (!isAdmin) throw new Error('Solo el administrador puede registrar gastos.');
+    const nowIso = new Date().toISOString();
+    const id = `exp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const newExp: OperatingExpense = {
+      ...expense,
+      id,
+      status: 'pending',
+      createdAt: nowIso,
+    };
+    await setDoc(doc(db, 'operating_expenses', id), sanitizeForFirestore(newExp));
+    await addAuditLog('add_expense', 'operating_expenses', id, `Gasto registrado: ${expense.name}`);
+  };
+
+  const markExpensePaid = async (expenseId: string, method: PaymentMethod, fromCash: boolean) => {
+    if (!isAdmin) throw new Error('Solo el administrador puede marcar gastos como pagados.');
+    const exp = expenses.find(e => e.id === expenseId);
+    if (!exp) throw new Error('Gasto no encontrado.');
+    if (fromCash && (!activeCashRegister || activeCashRegister.status !== 'open')) {
+      throw new Error('No se puede pagar desde caja porque no hay un turno de caja abierto.');
+    }
+
+    const nowIso = new Date().toISOString();
+    const batch = writeBatch(db);
+    batch.update(
+      doc(db, 'operating_expenses', expenseId),
+      sanitizeForFirestore({
+        status: 'paid',
+        paymentMethod: method,
+        paidFromCashRegister: fromCash,
+        lastPaidAt: nowIso,
+      })
+    );
+
+    if (fromCash && activeCashRegister) {
+      const nextCashExpenses = (activeCashRegister.cashExpenses || 0) + exp.amount;
+      batch.update(doc(db, 'cash_registers', activeCashRegister.id), {
+        cashExpenses: nextCashExpenses,
+        expectedCash: calculateExpectedCash({
+          ...activeCashRegister,
+          cashExpenses: nextCashExpenses,
+        }),
+      });
+      const movId = `cm_exp_${expenseId}_${Date.now().toString(36)}`;
+      batch.set(
+        doc(db, 'cash_movements', movId),
+        sanitizeForFirestore({
+          id: movId,
+          registerId: activeCashRegister.id,
+          type: 'expense',
+          amount: exp.amount,
+          paymentMethod: 'efectivo',
+          referenceId: expenseId,
+          description: `Gasto operativo: ${exp.name}`,
+          performedBy: getActorName(),
+          createdAt: nowIso,
+        })
+      );
+    }
+
+    await batch.commit();
+    await addAuditLog(
+      'pay_expense',
+      'operating_expenses',
+      expenseId,
+      `Pago de gasto: ${exp.name} (₡${exp.amount})`
+    );
+  };
+
+  // ------------------------------------------------------------------------
+  // SANITIZED BACKUP & CHUNKED VALIDATED RESTORE
+  // ------------------------------------------------------------------------
+  const exportDataBackup = (): string => {
+    const payload = buildSanitizedBackup({
+      categories,
+      products,
+      tables,
+      inventory_items: inventory,
+      recipes,
+      recipe_formulas: recipeFormulas,
+      suppliers,
+      purchases,
+      operating_expenses: expenses,
+      orders,
+      payments,
+      cash_registers: cashRegistersHistory,
+      cash_movements: cashMovements,
+      restaurant_config: [restaurantConfig],
+    });
+    return JSON.stringify(payload, null, 2);
+  };
+
+  const previewDataBackup = (backupJson: string): BackupValidationResult => {
+    try {
+      const parsed = JSON.parse(backupJson);
+      return validateBackupPayload(parsed);
+    } catch {
+      return {
+        valid: false,
+        errors: ['El contenido JSON no es válido o está corrupto.'],
+        warnings: [],
+        totalDocuments: 0,
+        collectionCounts: {},
+      };
+    }
+  };
+
+  const restoreDataBackup = async (
+    backupJson: string
+  ): Promise<{ success: boolean; message: string; count: number }> => {
+    if (!isAdmin) {
+      return { success: false, message: 'Solo un administrador puede restaurar respaldos.', count: 0 };
+    }
+    try {
+      const parsed = JSON.parse(backupJson);
+      const { batchesCommitted, documentsRestored } = await restoreBackupInChunks(db, parsed, 400);
+      await addAuditLog(
+        'data_restore',
+        'restaurant_config',
+        'main',
+        `Restauración validada por lotes (${documentsRestored} documentos en ${batchesCommitted} lotes)`
+      );
+      return {
+        success: true,
+        message: `Restauración completada: ${documentsRestored} documentos procesados en ${batchesCommitted} lotes seguros.`,
+        count: documentsRestored,
+      };
+    } catch (error: any) {
+      return {
+        success: false,
+        message: error?.message || 'Error restaurando el respaldo.',
+        count: 0,
+      };
+    }
   };
 
   return (
     <POSContext.Provider
       value={{
+        restaurantConfig,
+        updateRestaurantConfig,
         tables,
         categories,
         products,
@@ -2251,8 +3306,12 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateTableStatus,
         addTable,
         toggleTableActive,
-
+        rotateTableQRToken,
+        toggleTableQR,
+        importPollosKarenOfficialMenu,
         orders,
+        kitchenOrders,
+        pendingPublicOrders,
         currentOrder,
         setCurrentOrder,
         createNewOrder,
@@ -2260,43 +3319,59 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateOrderItemQuantity,
         removeOrderItem,
         setOrderObservations,
+        setOrderDeliveryDetails,
+        setOrderDiscount,
         saveActiveOrder,
+        authorizeOrderToKitchen,
+        updateKitchenOrderStatus,
+        markOrderDelivered,
         updateOrderStatus,
         cancelOrder,
-
+        transferTableOrder,
+        mergeTableOrders,
+        splitOrderItems,
+        acceptPublicOrder,
+        rejectPublicOrder,
         kitchenTickets,
         printOrderTicket,
         activeTicketToPrint,
         setActiveTicketToPrint,
-
+        payments,
         cashRegister,
+        activeCashRegister,
+        hasOpenCashRegister,
+        cashRegistersHistory,
+        staleOpenRegisters,
         cashMovements,
+        recordOrderPayment,
         completeOrderPayment,
+        refundPayment,
         recordPhysicalCount,
+        closeCashRegister,
         openNewDayRegister,
-
+        reopenCashRegister,
+        recordCashDrawerMovement,
         recipes,
         saveRecipe,
         toggleRecipeAutoDeduct,
         registerWaste,
         saveProduct,
-
         inventory,
         inventoryMovements,
+        suppliers,
+        saveSupplier,
         purchases,
         addPurchase,
+        recordCreditPurchasePayment,
         updateInventoryStock,
-
         expenses,
         addExpense,
         markExpensePaid,
-
         auditLogs,
         addAuditLog,
-
         exportDataBackup,
+        previewDataBackup,
         restoreDataBackup,
-
         isOnline,
         pendingOfflineCount,
         syncOfflineQueue,

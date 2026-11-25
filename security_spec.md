@@ -1,47 +1,44 @@
 # Security Specification — Pollos Karen Manager
 
-## 1. Data Invariants
+## 1. Data Invariants & Role Separation (3 Roles)
 
-1. **Role Separation**:
-   - `admin`: Three accounts with total access to inventory, purchases, expenses, audit logs, financial reports, and sales overrides.
-   - `colaborador`: Single shared account with POS-only permissions (create/edit active orders, collect payments, mark table status, print tickets).
-   - Colaboradores have NO read access to `purchases`, `operating_expenses`, `recipes`, `audit_logs`, or financial summary fields.
-2. **Order Immutability & Safe Status Transitions**:
-   - Once an order is `paymentStatus == 'paid'`, non-admin users cannot alter its items or financial amounts.
-   - Cancellation of confirmed sales requires `isAdmin()`.
-3. **Table Lifecycle**:
-   - Mesas 1–7 and Barra are maintained by admins. Colaboradores may only transition state between `libre`, `activa`, and `pendiente_pago`, and link the active `currentOrderId`.
-4. **Cash Movement & Register Integrity**:
-   - Purchases and expenses paid in cash from the register must be recorded as single idempotent `cash_movements`.
-   - Colaboradores can only record `sale` cash movements linked to their collected orders.
-5. **No Blind Client Trust**:
-   - All rules check `resource.data` or request constraints explicitly.
-   - User email from runtime (`alejandrodiazortiz07@gmail.com`) is bootstrapped as master administrator in `/admins/{uid}` and rule checks.
-
----
-
-## 2. The "Dirty Dozen" Threat Payloads
-
-1. **Payload 1: Colaborador Privileged Escalation**: Colaborador attempts to set their own role to `"admin"` in `/users/{uid}`. -> `PERMISSION_DENIED`
-2. **Payload 2: Colaborador Financial Snooping**: Colaborador attempts `get` or `list` on `/purchases` or `/operating_expenses`. -> `PERMISSION_DENIED`
-3. **Payload 3: Colaborador Recipe & Cost Leak**: Colaborador attempts reading `/recipes` which contains unit ingredient costs and profit margins. -> `PERMISSION_DENIED`
-4. **Payload 4: Ghost Field Injection on Order**: Attacker sends order payload with arbitrary shadow property `discount_override: 100`. -> `PERMISSION_DENIED`
-5. **Payload 5: Price Tampering in Catalog**: Colaborador attempts `update` on `/products/casado-pollo` setting price to `0`. -> `PERMISSION_DENIED`
-6. **Payload 6: Paid Order Hijack**: Colaborador attempts to change `total` on an already paid order (`paymentStatus: 'paid'`). -> `PERMISSION_DENIED`
-7. **Payload 7: Unaudited Sale Annulment**: Non-admin attempts to set order status to `'cancelled'`. -> `PERMISSION_DENIED`
-8. **Payload 8: Inventory Direct Write by Colaborador**: Non-admin attempts to directly adjust `currentStock` in `/inventory_items/arroz`. -> `PERMISSION_DENIED`
-9. **Payload 9: Fake Cash Adjustment**: Non-admin attempts to insert an arbitrary `adjustment` into `/cash_movements`. -> `PERMISSION_DENIED`
-10. **Payload 10: Cash Register Arqueo Tampering**: Colaborador attempts to overwrite `actualCash` or `difference` on closed register. -> `PERMISSION_DENIED`
-11. **Payload 11: Deletion of Audit Log**: Any user, including admin, attempts `delete` on `/audit_logs/{logId}`. -> `PERMISSION_DENIED`
-12. **Payload 12: Oversized String Denial-of-Wallet Attack**: Attacker sends a 50KB string in `observations`. -> `PERMISSION_DENIED`
+1. **Zero Public Self-Registration**:
+   - No arbitrary Google or email account may create `/users/{uid}`.
+   - Only an active Administrator may create staff accounts or pre-authorized `/user_invites/{inviteId}` entries.
+   - Deactivated accounts (`active == false`) are immediately rejected by both Firestore Rules (`isActiveUser()`) and real-time client profile revocation.
+2. **Three Strict Roles**:
+   - `admin`: Full access to finances, inventory, recipes/costs, purchases, suppliers, operating expenses, audit logs, backups, restaurant configuration, and user administration.
+   - `colaborador`: Operational POS & cashier access (active orders, table status, confirmed payments, open register sales counters, kitchen order sync, public order authorization, non-fiscal receipt printing). **Zero read access** to `purchases`, `operating_expenses`, `suppliers`, `recipes` (contains costs), `inventory_items` (contains unit costs), `audit_logs`, or `admins` list.
+   - `cocina`: Isolated Kitchen Display System (KDS) role. **ONLY** reads sanitized `/kitchen_orders/{orderId}` (strictly zero prices, zero totals, zero payment fields) and updates preparation transitions (`in_preparation`, `ready`). **Zero access** to `/orders`, `/payments`, `/cash_registers`, `/cash_movements`, `/purchases`, `/operating_expenses`, `/recipes`, `/inventory_items`, or `/audit_logs`.
+3. **Separated Operational & Financial Lifecycles**:
+   - `operationalStatus`: `pending_auth` → `authorized` → `in_preparation` → `ready` → `delivered` (or `cancelled`).
+   - `financialStatus`: `unpaid` → `partially_paid` → `paid` → `refunded`.
+   - Once `financialStatus == 'paid'` or `paymentStatus == 'paid'`, non-admin users cannot alter line items or monetary amounts; they may only update operational delivery status (`delivered`).
+   - Order cancellation and payment refunds strictly require `isAdmin()`.
+4. **Explicit Cash Register Control**:
+   - Cash registers are never auto-initialized with arbitrary floats. Opening, closing, reopening, and non-sale drawer movements require explicit authorization (`isAdmin()` or authorized open/close flow) and register `status == 'open'` is enforced for sales.
+5. **Immutable Audit Logs & Payment Records**:
+   - `/audit_logs/{logId}` is strictly append-only (`update: false, delete: false`), bound to `request.auth.uid`, and cross-checked with `exists()` / `existsAfter()` against real documents.
+   - `/payments/{paymentId}` is append-only for staff; only admins may record refund status updates.
+6. **Public Digital Menu & Order Isolation**:
+   - `/public_catalog/menu` exposes strictly sanitized menu data (zero costs, zero recipes, zero internal data).
+   - Public orders are price-verified server-side in `/api/public/order` and enter as `operationalStatus: 'pending_auth'`.
 
 ---
 
-## 3. Security Test Runner Specifications
+## 2. Threat Payloads & Expected Enforcement
 
-The rules enforce:
-- Master Gate pattern.
-- Standalone `isValid[Entity]` validators checking strict key sets, types, and string bounds (`size() <= MAX`).
-- `isAdmin()` validated against `/admins/$(request.auth.uid)`.
-- Default deny catch-all `match /{document=**} { allow read, write: if false; }`.
-- Read and write constraints on every collection.
+1. **Unauthorized Google Self-Registration**: Stranger authenticates with Google and tries `setDoc('/users/{uid}', { role: 'colaborador' })` without invite -> `PERMISSION_DENIED`.
+2. **Colaborador Privilege Escalation**: Colaborador attempts setting own `role` to `'admin'` in `/users/{uid}` -> `PERMISSION_DENIED`.
+3. **Deactivated User Write**: User with `active: false` attempts creating an order -> `PERMISSION_DENIED`.
+4. **Cocina Financial Snooping**: User with `role: 'cocina'` attempts reading `/orders`, `/payments`, or `/cash_registers` -> `PERMISSION_DENIED`.
+5. **Colaborador Recipe & Cost Leak**: Colaborador attempts reading `/recipes` or `/inventory_items` -> `PERMISSION_DENIED`.
+6. **Colaborador Financial Snooping**: Colaborador attempts reading `/purchases`, `/operating_expenses`, `/suppliers`, or `/audit_logs` -> `PERMISSION_DENIED`.
+7. **Price Tampering in Catalog**: Colaborador or Cocina attempts modifying `/products/{id}` -> `PERMISSION_DENIED`.
+8. **Paid Order Financial Hijack**: Colaborador attempts changing `total` or `items` on an already paid order -> `PERMISSION_DENIED`.
+9. **Unaudited Cancellation**: Non-admin attempts changing order to `cancelled` -> `PERMISSION_DENIED`.
+10. **Inventory Arbitrary Adjustment**: Colaborador attempts increasing `currentStock` or editing `averageCost` -> `PERMISSION_DENIED`.
+11. **Fake Cash Register Creation / Arqueo Tampering**: Colaborador attempts overwriting `actualCash` or `difference` on a closed register -> `PERMISSION_DENIED`.
+12. **Audit Log Deletion or Tampering**: Any user (including admin) attempts `update` or `delete` on `/audit_logs/{id}` -> `PERMISSION_DENIED`.
+13. **Oversized String Denial-of-Wallet**: Any user submits >1000 char `observations` -> `PERMISSION_DENIED`.
+14. **Invoice Duplicate Race Condition**: Two concurrent registrations with same vendor + invoice number attempt creating `/purchase_invoice_locks/{lockId}` -> Second gets `PERMISSION_DENIED` (`!exists(...)`).

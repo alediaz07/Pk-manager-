@@ -1,5 +1,6 @@
 import React from 'react';
 import { KitchenTicket } from '../../types';
+import { usePOS } from '../../context/POSContext';
 import { formatDateTime } from '../../utils/formatters';
 import { printKitchenTicket } from '../../utils/thermalPrinter';
 import { X, Printer, Copy } from 'lucide-react';
@@ -10,10 +11,13 @@ interface KitchenTicketModalProps {
 }
 
 export const KitchenTicketModal: React.FC<KitchenTicketModalProps> = ({ ticket, onClose }) => {
+  const { restaurantConfig } = usePOS();
   if (!ticket) return null;
 
+  const width = ticket.paperWidth || restaurantConfig.printerWidth || '80mm';
+
   const handlePrint = () => {
-    printKitchenTicket(ticket);
+    printKitchenTicket(ticket, width);
   };
 
   return (
@@ -23,7 +27,7 @@ export const KitchenTicketModal: React.FC<KitchenTicketModalProps> = ({ ticket, 
         <div className="flex items-center justify-between pb-3 border-b border-gray-100">
           <div className="flex items-center gap-2">
             <Printer className="w-5 h-5 text-red-600" />
-            <h3 className="font-black text-gray-900 text-base">Comanda de Cocina 80mm</h3>
+            <h3 className="font-black text-gray-900 text-base">Comanda de Cocina {width}</h3>
           </div>
           <button
             onClick={onClose}

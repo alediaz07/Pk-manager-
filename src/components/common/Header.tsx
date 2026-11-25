@@ -13,11 +13,19 @@ import {
   LogOut,
   ChevronDown,
   RefreshCw,
+  AlertTriangle,
 } from 'lucide-react';
 
 export const Header: React.FC = () => {
   const { appUser, role, isAdmin, logout } = useAuth();
-  const { cashRegister, isOnline, pendingOfflineCount, syncOfflineQueue } = usePOS();
+  const {
+    cashRegister,
+    hasOpenCashRegister,
+    staleOpenRegisters,
+    isOnline,
+    pendingOfflineCount,
+    syncOfflineQueue,
+  } = usePOS();
 
   const [crTime, setCrTime] = useState<string>('');
   const [showUserMenu, setShowUserMenu] = useState(false);
@@ -52,26 +60,45 @@ export const Header: React.FC = () => {
             <div className="flex items-center gap-2">
               <span className="font-extrabold text-lg tracking-wide uppercase">Pollos Karen</span>
               <span className="text-[11px] bg-red-800 text-red-100 font-semibold px-2 py-0.5 rounded-full border border-red-700 hidden sm:inline-block">
-                POS Costa Rica
+                La Uruca • CR
               </span>
             </div>
             <div className="flex items-center gap-2 text-xs text-red-100">
               <Clock className="w-3.5 h-3.5 opacity-80" />
               <span>{crTime || 'Cargando hora CR...'}</span>
               <span className="text-red-300">•</span>
-              <span>Caja #{cashRegister.date}</span>
+              <span>
+                {hasOpenCashRegister ? `Turno ${cashRegister.date} (Abierta)` : 'Caja Cerrada'}
+              </span>
             </div>
           </div>
         </div>
 
-        {/* Center / Stats (Tablet & Desktop) */}
+        {/* Center / Operational Indicators */}
         <div className="hidden md:flex items-center gap-3">
+          {staleOpenRegisters.length > 0 && (
+            <div className="flex items-center gap-1.5 bg-amber-400 text-amber-950 px-2.5 py-1.5 rounded-xl text-xs font-black">
+              <AlertTriangle className="w-3.5 h-3.5" />
+              <span>Turno anterior sin cerrar ({staleOpenRegisters[0].date})</span>
+            </div>
+          )}
+
           {/* Cash Drawer Status */}
-          <div className="flex items-center gap-2 bg-red-700/80 px-3 py-1.5 rounded-xl border border-red-500/40 text-xs font-medium">
+          <div
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-medium ${
+              hasOpenCashRegister
+                ? 'bg-red-700/80 border-red-500/40'
+                : 'bg-red-900/80 border-red-400/40'
+            }`}
+          >
             <Coins className="w-4 h-4 text-amber-300" />
             <div>
-              <div className="text-[10px] text-red-200 leading-none">Efectivo en Caja</div>
-              <div className="font-bold text-amber-200">{formatCRC(cashRegister.expectedCash)}</div>
+              <div className="text-[10px] text-red-200 leading-none">
+                {hasOpenCashRegister ? 'Efectivo Esperado' : 'Estado de Caja'}
+              </div>
+              <div className="font-bold text-amber-200">
+                {hasOpenCashRegister ? formatCRC(cashRegister.expectedCash) : 'Sin turno abierto'}
+              </div>
             </div>
           </div>
 
@@ -82,12 +109,12 @@ export const Header: React.FC = () => {
             }`}
           >
             {isOnline ? <Wifi className="w-3.5 h-3.5" /> : <WifiOff className="w-3.5 h-3.5" />}
-            <span>{isOnline ? 'En línea' : 'Sin conexión (Offline)'}</span>
+            <span>{isOnline ? 'En línea' : 'Sin conexión'}</span>
             {pendingOfflineCount > 0 && (
               <button
                 onClick={syncOfflineQueue}
-                className="ml-1 bg-white text-gray-900 px-1.5 py-0.5 rounded-md text-[10px] flex items-center gap-1 hover:bg-gray-100"
-                title="Sincronizar órdenes pendientes"
+                className="ml-1 bg-white text-gray-900 px-1.5 py-0.5 rounded-md text-[10px] flex items-center gap-1 hover:bg-gray-100 cursor-pointer"
+                title="Sincronizar operaciones pendientes"
               >
                 <RefreshCw className="w-2.5 h-2.5" />
                 <span>{pendingOfflineCount}</span>
@@ -100,22 +127,22 @@ export const Header: React.FC = () => {
         <div className="flex items-center gap-2">
           <PWAInstallButton />
 
-          {/* Real Role Indicator */}
           <div className="relative">
             <button
               onClick={() => setShowUserMenu(!showUserMenu)}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition shadow-sm border ${
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition shadow-sm border cursor-pointer ${
                 isAdmin
                   ? 'bg-amber-400 text-amber-950 border-amber-300 hover:bg-amber-300'
                   : 'bg-white text-red-700 border-white hover:bg-red-50'
               }`}
             >
               {isAdmin ? <Shield className="w-3.5 h-3.5" /> : <UserCheck className="w-3.5 h-3.5" />}
-              <span className="capitalize">{role === 'admin' ? 'Administrador' : 'Colaborador'}</span>
+              <span className="capitalize">
+                {role === 'admin' ? 'Administrador' : role === 'cocina' ? 'Cocina' : 'Colaborador'}
+              </span>
               <ChevronDown className="w-3 h-3 opacity-70" />
             </button>
 
-            {/* Dropdown Menu */}
             {showUserMenu && (
               <div className="absolute right-0 mt-2 w-64 bg-white rounded-2xl shadow-2xl border border-gray-100 p-2.5 text-gray-800 z-50 text-xs">
                 <div className="px-2.5 py-2 border-b border-gray-100 mb-2">
@@ -127,7 +154,7 @@ export const Header: React.FC = () => {
                         isAdmin ? 'bg-amber-100 text-amber-900' : 'bg-blue-100 text-blue-900'
                       }`}
                     >
-                      Rol Verificado: {role === 'admin' ? 'Administrador' : 'Colaborador'}
+                      Rol: {role === 'admin' ? 'Administrador' : role === 'cocina' ? 'Cocina' : 'Colaborador'}
                     </span>
                   </div>
                 </div>

@@ -2,17 +2,31 @@
   "entities": {
     "User": {
       "title": "User",
-      "description": "User profile with role-based access for Pollos Karen",
+      "description": "Authorized staff profile with 3-role RBAC for Pollos Karen",
       "type": "object",
       "properties": {
         "email": { "type": "string", "maxLength": 128 },
         "displayName": { "type": "string", "maxLength": 100 },
-        "role": { "type": "string", "enum": ["admin", "colaborador"] },
+        "role": { "type": "string", "enum": ["admin", "colaborador", "cocina"] },
         "active": { "type": "boolean" },
         "createdAt": { "type": "string" },
         "updatedAt": { "type": "string" }
       },
       "required": ["email", "displayName", "role", "active"]
+    },
+    "UserInvite": {
+      "title": "UserInvite",
+      "description": "Admin-created pre-authorization allowing a Google account to join with a fixed role",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "maxLength": 128 },
+        "displayName": { "type": "string", "maxLength": 100 },
+        "role": { "type": "string", "enum": ["colaborador", "cocina"] },
+        "active": { "type": "boolean" },
+        "invitedBy": { "type": "string", "maxLength": 100 },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["email", "displayName", "role", "active", "createdAt"]
     },
     "Admin": {
       "title": "Admin",
@@ -32,13 +46,14 @@
         "name": { "type": "string", "maxLength": 60 },
         "order": { "type": "number" },
         "icon": { "type": "string", "maxLength": 50 },
-        "active": { "type": "boolean" }
+        "active": { "type": "boolean" },
+        "breakfastOnly": { "type": "boolean" }
       },
       "required": ["name", "order", "active"]
     },
     "Product": {
       "title": "Product",
-      "description": "Menu items and casados",
+      "description": "Menu items, breakfasts, daily specials, and casados",
       "type": "object",
       "properties": {
         "name": { "type": "string", "maxLength": 100 },
@@ -49,13 +64,16 @@
         "proteinOptions": { "type": "array" },
         "available": { "type": "boolean" },
         "active": { "type": "boolean" },
+        "breakfastOnly": { "type": "boolean" },
+        "dayOfWeek": { "type": "number" },
+        "isFavorite": { "type": "boolean" },
         "updatedAt": { "type": "string" }
       },
       "required": ["name", "categoryId", "price", "isCasado", "available", "active"]
     },
     "Table": {
       "title": "Table",
-      "description": "Dining tables 1-7 and Barra",
+      "description": "Dining tables 1-7 and Barra with revocable QR token",
       "type": "object",
       "properties": {
         "name": { "type": "string", "maxLength": 50 },
@@ -64,13 +82,15 @@
         "active": { "type": "boolean" },
         "status": { "type": "string", "enum": ["libre", "activa", "pendiente_pago"] },
         "currentOrderId": { "type": "string", "maxLength": 64 },
+        "qrToken": { "type": "string", "maxLength": 80 },
+        "qrEnabled": { "type": "boolean" },
         "updatedAt": { "type": "string" }
       },
       "required": ["name", "number", "type", "active", "status"]
     },
     "Order": {
       "title": "Order",
-      "description": "Restaurant order for dine-in, take-out, or delivery",
+      "description": "Restaurant order with separated operational and financial states",
       "type": "object",
       "properties": {
         "orderNumber": { "type": "string", "maxLength": 32 },
@@ -79,13 +99,19 @@
         "tableName": { "type": "string", "maxLength": 50 },
         "items": { "type": "array" },
         "status": { "type": "string", "enum": ["pending", "in_kitchen", "served", "completed", "cancelled"] },
-        "paymentStatus": { "type": "string", "enum": ["unpaid", "paid"] },
+        "operationalStatus": { "type": "string", "enum": ["pending_auth", "authorized", "in_preparation", "ready", "delivered", "cancelled"] },
+        "financialStatus": { "type": "string", "enum": ["unpaid", "partially_paid", "paid", "refunded"] },
+        "paymentStatus": { "type": "string", "enum": ["unpaid", "partially_paid", "paid", "refunded"] },
         "paymentMethod": { "type": "string", "enum": ["efectivo", "sinpe", "tarjeta", "mixto"] },
+        "paidAmount": { "type": "number" },
         "subtotal": { "type": "number" },
         "serviceCharge": { "type": "number" },
+        "deliveryFee": { "type": "number" },
+        "discount": { "type": "number" },
         "total": { "type": "number" },
         "observations": { "type": "string", "maxLength": 500 },
         "operationalDate": { "type": "string", "maxLength": 20 },
+        "source": { "type": "string", "enum": ["pos", "qr_mesa", "menu_expres"] },
         "createdBy": { "type": "string", "maxLength": 128 },
         "createdAt": { "type": "string" },
         "updatedAt": { "type": "string" },
@@ -93,9 +119,47 @@
       },
       "required": ["orderNumber", "serviceType", "items", "status", "paymentStatus", "subtotal", "serviceCharge", "total"]
     },
+    "KitchenOrder": {
+      "title": "KitchenOrder",
+      "description": "Sanitized KDS projection strictly free of prices, totals, or payment details",
+      "type": "object",
+      "properties": {
+        "orderId": { "type": "string", "maxLength": 64 },
+        "orderNumber": { "type": "string", "maxLength": 32 },
+        "serviceType": { "type": "string", "enum": ["mesa", "ventana", "expres"] },
+        "tableName": { "type": "string", "maxLength": 50 },
+        "operationalStatus": { "type": "string", "enum": ["authorized", "in_preparation", "ready", "delivered", "cancelled"] },
+        "items": { "type": "array" },
+        "observations": { "type": "string", "maxLength": 500 },
+        "authorizedAt": { "type": "string" },
+        "startedAt": { "type": "string" },
+        "readyAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["orderId", "orderNumber", "serviceType", "operationalStatus", "items", "authorizedAt"]
+    },
+    "Payment": {
+      "title": "Payment",
+      "description": "Persistent payment transaction supporting single, partial, mixed, and refunded flows",
+      "type": "object",
+      "properties": {
+        "orderId": { "type": "string", "maxLength": 64 },
+        "orderNumber": { "type": "string", "maxLength": 32 },
+        "registerId": { "type": "string", "maxLength": 64 },
+        "amount": { "type": "number" },
+        "method": { "type": "string", "enum": ["efectivo", "sinpe", "tarjeta"] },
+        "status": { "type": "string", "enum": ["confirmed", "refunded", "voided"] },
+        "sinpeReference": { "type": "string", "maxLength": 80 },
+        "cardAuthCode": { "type": "string", "maxLength": 80 },
+        "idempotencyKey": { "type": "string", "maxLength": 128 },
+        "performedBy": { "type": "string", "maxLength": 100 },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["orderId", "orderNumber", "registerId", "amount", "method", "status", "idempotencyKey", "createdAt"]
+    },
     "KitchenTicket": {
       "title": "KitchenTicket",
-      "description": "Kitchen print job audit",
+      "description": "Thermal print job audit",
       "type": "object",
       "properties": {
         "orderId": { "type": "string", "maxLength": 64 },
@@ -111,7 +175,7 @@
     },
     "CashRegister": {
       "title": "CashRegister",
-      "description": "Daily operational cash drawer period",
+      "description": "Explicitly opened and closed daily cash shift",
       "type": "object",
       "properties": {
         "date": { "type": "string", "maxLength": 20 },
@@ -124,6 +188,9 @@
         "cashSales": { "type": "number" },
         "sinpeSales": { "type": "number" },
         "cardSales": { "type": "number" },
+        "cashDeposits": { "type": "number" },
+        "cashWithdrawals": { "type": "number" },
+        "cashRefunds": { "type": "number" },
         "cashPurchases": { "type": "number" },
         "cashExpenses": { "type": "number" },
         "expectedCash": { "type": "number" },
@@ -135,11 +202,11 @@
     },
     "CashMovement": {
       "title": "CashMovement",
-      "description": "Individual cash register transaction with idempotency",
+      "description": "Individual cash register transaction",
       "type": "object",
       "properties": {
         "registerId": { "type": "string", "maxLength": 64 },
-        "type": { "type": "string", "enum": ["sale", "purchase", "expense", "adjustment", "initial_float"] },
+        "type": { "type": "string", "enum": ["sale", "purchase", "expense", "deposit", "withdrawal", "refund", "adjustment", "initial_float"] },
         "amount": { "type": "number" },
         "paymentMethod": { "type": "string", "maxLength": 20 },
         "referenceId": { "type": "string", "maxLength": 64 },
@@ -151,7 +218,7 @@
     },
     "InventoryItem": {
       "title": "InventoryItem",
-      "description": "Raw material, beverage, packaging or supply item",
+      "description": "Raw material, beverage, packaging or supply item (cost fields admin-only)",
       "type": "object",
       "properties": {
         "name": { "type": "string", "maxLength": 100 },
@@ -167,12 +234,12 @@
     },
     "InventoryMovement": {
       "title": "InventoryMovement",
-      "description": "Stock adjustment, purchase entry or consumption log",
+      "description": "Stock adjustment, purchase entry, waste or consumption log",
       "type": "object",
       "properties": {
         "itemId": { "type": "string", "maxLength": 64 },
         "itemName": { "type": "string", "maxLength": 100 },
-        "type": { "type": "string", "enum": ["purchase", "consumption", "adjustment", "waste"] },
+        "type": { "type": "string", "enum": ["purchase", "consumption", "adjustment", "waste", "reversal"] },
         "quantity": { "type": "number" },
         "previousStock": { "type": "number" },
         "newStock": { "type": "number" },
@@ -180,21 +247,52 @@
         "performedBy": { "type": "string", "maxLength": 100 },
         "createdAt": { "type": "string" }
       },
-      "required": ["itemId", "itemName", "type", "quantity", "previousStock", "newStock", "createdAt"]
+      "required": ["itemId", "itemName", "type", "quantity", "createdAt"]
+    },
+    "RecipeFormula": {
+      "title": "RecipeFormula",
+      "description": "Zero-cost operational deduction formula synced from admin recipes",
+      "type": "object",
+      "properties": {
+        "productId": { "type": "string", "maxLength": 64 },
+        "protein": { "type": "string", "maxLength": 50 },
+        "yieldPortions": { "type": "number" },
+        "autoDeductEnabled": { "type": "boolean" },
+        "ingredients": { "type": "array" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["productId", "yieldPortions", "autoDeductEnabled", "ingredients"]
+    },
+    "Supplier": {
+      "title": "Supplier",
+      "description": "Vendor directory for supply purchases and accounts payable",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "maxLength": 120 },
+        "phone": { "type": "string", "maxLength": 30 },
+        "email": { "type": "string", "maxLength": 120 },
+        "paymentTerms": { "type": "string", "enum": ["contado", "credito_7", "credito_15", "credito_30"] },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["name", "paymentTerms", "active", "createdAt"]
     },
     "Purchase": {
       "title": "Purchase",
-      "description": "Commercial supply invoice or purchase receipt",
+      "description": "Commercial supply invoice with credit / accounts payable support",
       "type": "object",
       "properties": {
         "purchaseNumber": { "type": "string", "maxLength": 50 },
         "vendor": { "type": "string", "maxLength": 100 },
+        "supplierId": { "type": "string", "maxLength": 64 },
         "date": { "type": "string", "maxLength": 20 },
         "paymentMethod": { "type": "string", "enum": ["efectivo", "transferencia", "tarjeta", "credito"] },
         "paidFromCashRegister": { "type": "boolean" },
+        "creditStatus": { "type": "string", "enum": ["paid", "pending", "partial"] },
+        "paidAmount": { "type": "number" },
+        "dueDate": { "type": "string", "maxLength": 20 },
         "items": { "type": "array" },
         "total": { "type": "number" },
-        "notes": { "type": "string", "maxLength": 300 },
         "registeredBy": { "type": "string", "maxLength": 100 },
         "createdAt": { "type": "string" }
       },
@@ -202,7 +300,7 @@
     },
     "Recipe": {
       "title": "Recipe",
-      "description": "Dish recipe and cost breakdown per protein",
+      "description": "Admin-only dish recipe and cost breakdown per protein",
       "type": "object",
       "properties": {
         "productId": { "type": "string", "maxLength": 64 },
@@ -219,39 +317,52 @@
     },
     "OperatingExpense": {
       "title": "OperatingExpense",
-      "description": "Recurring or fixed utility and operational bill",
+      "description": "Recurring or one-time operating expense",
       "type": "object",
       "properties": {
         "name": { "type": "string", "maxLength": 100 },
-        "category": { "type": "string", "enum": ["alquiler", "electricidad", "agua", "gas", "internet", "servicios", "permisos", "otros"] },
+        "category": { "type": "string", "maxLength": 40 },
         "amount": { "type": "number" },
         "paymentMethod": { "type": "string", "maxLength": 20 },
         "paidFromCashRegister": { "type": "boolean" },
-        "frequency": { "type": "string", "enum": ["mensual", "quincenal", "anual", "unico"] },
+        "frequency": { "type": "string", "enum": ["mensual", "quincenal", "semanal", "anual", "unico"] },
         "dueDate": { "type": "string", "maxLength": 20 },
-        "nextDueDate": { "type": "string", "maxLength": 20 },
         "status": { "type": "string", "enum": ["pending", "paid"] },
-        "lastPaidAt": { "type": "string" },
-        "notes": { "type": "string", "maxLength": 300 },
         "createdAt": { "type": "string" }
       },
       "required": ["name", "category", "amount", "frequency", "dueDate", "status"]
     },
-    "AuditLog": {
-      "title": "AuditLog",
-      "description": "Tamper-evident audit trail for financial & order modifications",
+    "RestaurantConfig": {
+      "title": "RestaurantConfig",
+      "description": "Operational schedule, pricing percentages, express delivery fee, and printer config",
       "type": "object",
       "properties": {
-        "action": { "type": "string", "maxLength": 50 },
-        "collection": { "type": "string", "maxLength": 50 },
-        "documentId": { "type": "string", "maxLength": 64 },
+        "restaurantName": { "type": "string", "maxLength": 100 },
+        "openTime": { "type": "string", "maxLength": 10 },
+        "closeTime": { "type": "string", "maxLength": 10 },
+        "tableServicePercent": { "type": "number" },
+        "expressDeliveryFee": { "type": "number" },
+        "inventoryDeductionTrigger": { "type": "string", "enum": ["kitchen_auth", "payment"] },
+        "printerPaperWidth": { "type": "string", "enum": ["58mm", "80mm"] }
+      },
+      "required": ["restaurantName", "tableServicePercent", "expressDeliveryFee"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Tamper-evident append-only audit trail",
+      "type": "object",
+      "properties": {
+        "action": { "type": "string", "maxLength": 64 },
+        "collection": { "type": "string", "maxLength": 64 },
+        "documentId": { "type": "string", "maxLength": 128 },
         "reason": { "type": "string", "maxLength": 300 },
-        "performedBy": { "type": "string", "maxLength": 100 },
+        "performedBy": { "type": "string", "maxLength": 128 },
+        "performedByUid": { "type": "string", "maxLength": 128 },
         "performedByEmail": { "type": "string", "maxLength": 128 },
         "timestamp": { "type": "string" },
         "details": { "type": "string", "maxLength": 2000 }
       },
-      "required": ["action", "collection", "documentId", "performedBy", "timestamp"]
+      "required": ["action", "collection", "documentId", "performedBy", "performedByUid", "timestamp"]
     },
     "PurchaseInvoiceLock": {
       "title": "PurchaseInvoiceLock",
@@ -262,77 +373,33 @@
         "purchaseNumber": { "type": "string", "maxLength": 64 },
         "purchaseId": { "type": "string", "maxLength": 64 },
         "total": { "type": "number" },
-        "registeredAt": { "type": "string" },
-        "registeredBy": { "type": "string", "maxLength": 128 },
-        "registeredByEmail": { "type": "string", "maxLength": 128 }
+        "registeredAt": { "type": "string" }
       },
       "required": ["vendor", "purchaseNumber", "purchaseId", "total", "registeredAt"]
     }
   },
   "firestore": {
-    "/users/{userId}": {
-      "schema": "User",
-      "description": "User profiles and assigned role"
-    },
-    "/admins/{adminId}": {
-      "schema": "Admin",
-      "description": "Master list of authorized administrator UIDs"
-    },
-    "/categories/{categoryId}": {
-      "schema": "Category",
-      "description": "Menu category catalog"
-    },
-    "/products/{productId}": {
-      "schema": "Product",
-      "description": "Food and beverage item definitions"
-    },
-    "/tables/{tableId}": {
-      "schema": "Table",
-      "description": "Dining tables 1-7 and Barra status"
-    },
-    "/orders/{orderId}": {
-      "schema": "Order",
-      "description": "Customer restaurant orders"
-    },
-    "/kitchen_tickets/{ticketId}": {
-      "schema": "KitchenTicket",
-      "description": "Kitchen print tickets history"
-    },
-    "/cash_registers/{registerId}": {
-      "schema": "CashRegister",
-      "description": "Cash register shifts and balances"
-    },
-    "/cash_movements/{movementId}": {
-      "schema": "CashMovement",
-      "description": "Cash flow transactions"
-    },
-    "/inventory_items/{itemId}": {
-      "schema": "InventoryItem",
-      "description": "Restaurant raw materials and inventory"
-    },
-    "/inventory_movements/{movementId}": {
-      "schema": "InventoryMovement",
-      "description": "Inventory movement audit log"
-    },
-    "/purchases/{purchaseId}": {
-      "schema": "Purchase",
-      "description": "Supply purchases and expenses"
-    },
-    "/recipes/{recipeId}": {
-      "schema": "Recipe",
-      "description": "Ingredient recipes and unit costs"
-    },
-    "/operating_expenses/{expenseId}": {
-      "schema": "OperatingExpense",
-      "description": "Operational expenses and recurring bills"
-    },
-    "/audit_logs/{logId}": {
-      "schema": "AuditLog",
-      "description": "Audit trail for sensitive admin overrides"
-    },
-    "/purchase_invoice_locks/{lockId}": {
-      "schema": "PurchaseInvoiceLock",
-      "description": "Unique lock registry to prevent concurrent duplicate invoices"
-    }
+    "/users/{userId}": { "schema": "User", "description": "Staff profiles and roles" },
+    "/user_invites/{inviteId}": { "schema": "UserInvite", "description": "Admin pre-authorizations for Google sign-in" },
+    "/admins/{adminId}": { "schema": "Admin", "description": "Authorized administrator UIDs" },
+    "/categories/{categoryId}": { "schema": "Category", "description": "Menu categories" },
+    "/products/{productId}": { "schema": "Product", "description": "Menu products" },
+    "/tables/{tableId}": { "schema": "Table", "description": "Tables 1-7 and Barra" },
+    "/orders/{orderId}": { "schema": "Order", "description": "Restaurant orders" },
+    "/kitchen_orders/{orderId}": { "schema": "KitchenOrder", "description": "Sanitized KDS orders (zero prices)" },
+    "/payments/{paymentId}": { "schema": "Payment", "description": "Persistent payment transactions" },
+    "/kitchen_tickets/{ticketId}": { "schema": "KitchenTicket", "description": "Thermal print audit" },
+    "/cash_registers/{registerId}": { "schema": "CashRegister", "description": "Cash register shifts" },
+    "/cash_movements/{movementId}": { "schema": "CashMovement", "description": "Cash drawer movements" },
+    "/inventory_items/{itemId}": { "schema": "InventoryItem", "description": "Raw materials and costs (admin read)" },
+    "/inventory_movements/{movementId}": { "schema": "InventoryMovement", "description": "Inventory movement history" },
+    "/recipe_formulas/{recipeId}": { "schema": "RecipeFormula", "description": "Zero-cost portion formulas for POS deduction" },
+    "/suppliers/{supplierId}": { "schema": "Supplier", "description": "Vendor directory (admin only)" },
+    "/purchases/{purchaseId}": { "schema": "Purchase", "description": "Supply purchases and CxP (admin only)" },
+    "/recipes/{recipeId}": { "schema": "Recipe", "description": "Dish recipes and unit costs (admin only)" },
+    "/operating_expenses/{expenseId}": { "schema": "OperatingExpense", "description": "Operating expenses (admin only)" },
+    "/restaurant_config/{configId}": { "schema": "RestaurantConfig", "description": "Operational settings" },
+    "/audit_logs/{logId}": { "schema": "AuditLog", "description": "Append-only audit trail" },
+    "/purchase_invoice_locks/{lockId}": { "schema": "PurchaseInvoiceLock", "description": "Anti-duplicate invoice lock" }
   }
 }

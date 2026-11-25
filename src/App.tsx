@@ -1,9 +1,10 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { POSProvider } from './context/POSContext';
 import { LoginView } from './components/auth/LoginView';
 import { Header } from './components/common/Header';
 import { Sidebar, NavTab } from './components/common/Sidebar';
+import { PWAUpdatePrompt } from './components/common/PWAUpdatePrompt';
 import { POSView } from './components/pos/POSView';
 import { TablesView } from './components/tables/TablesView';
 import { CashRegisterView } from './components/cash/CashRegisterView';
@@ -13,10 +14,13 @@ import { ExpensesView } from './components/expenses/ExpensesView';
 import { RecipesView } from './components/recipes/RecipesView';
 import { DashboardView } from './components/dashboard/DashboardView';
 import { AuditView } from './components/audit/AuditView';
+import { KitchenDisplayView } from './components/kitchen/KitchenDisplayView';
+import { RestaurantConfigView } from './components/config/RestaurantConfigView';
+import { PublicMenuView } from './components/public/PublicMenuView';
 import { Loader2 } from 'lucide-react';
 
 function AppContent() {
-  const { currentUser, loading } = useAuth();
+  const { currentUser, isCocina, loading } = useAuth();
   const [activeTab, setActiveTab] = useState<NavTab>('pos');
 
   if (loading) {
@@ -33,9 +37,19 @@ function AppContent() {
     );
   }
 
-  // Strictly enforce authentication: no access without signing in
+  // Strictly enforce authentication for internal application
   if (!currentUser) {
     return <LoginView />;
+  }
+
+  // Strict KDS isolation for Cocina role: zero access to POS, prices, cash, or admin views
+  if (isCocina) {
+    return (
+      <>
+        <KitchenDisplayView />
+        <PWAUpdatePrompt />
+      </>
+    );
   }
 
   return (
@@ -48,6 +62,7 @@ function AppContent() {
           {activeTab === 'tables' && (
             <TablesView onOpenPOSForTable={() => setActiveTab('pos')} />
           )}
+          {activeTab === 'kitchen' && <KitchenDisplayView />}
           {activeTab === 'cash' && <CashRegisterView />}
           {activeTab === 'inventory' && <InventoryView />}
           {activeTab === 'purchases' && <PurchasesView />}
@@ -55,13 +70,33 @@ function AppContent() {
           {activeTab === 'recipes' && <RecipesView />}
           {activeTab === 'dashboard' && <DashboardView />}
           {activeTab === 'audit' && <AuditView />}
+          {activeTab === 'config' && <RestaurantConfigView />}
         </main>
       </div>
+      <PWAUpdatePrompt />
     </div>
   );
 }
 
 export default function App() {
+  // Detect public digital menu routes (?menu=table&token=... or ?menu=expres) BEFORE auth gate
+  const publicRoute = useMemo(() => {
+    if (typeof window === 'undefined') return null;
+    const params = new URLSearchParams(window.location.search);
+    const menu = params.get('menu');
+    if (menu === 'table') {
+      return { mode: 'table' as const, token: params.get('token') || '' };
+    }
+    if (menu === 'expres') {
+      return { mode: 'expres' as const, token: undefined };
+    }
+    return null;
+  }, []);
+
+  if (publicRoute) {
+    return <PublicMenuView mode={publicRoute.mode} tableToken={publicRoute.token} />;
+  }
+
   return (
     <AuthProvider>
       <POSProvider>
