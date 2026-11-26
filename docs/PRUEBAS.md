@@ -3,7 +3,9 @@
 **Fecha de ejecución**: 2026-11-25  
 **Entorno**: Sandbox Node.js v22.23.5 + TypeScript (`tsc --noEmit`) + Vite 8
 
-## 1. Pruebas Automatizadas Ejecutadas (Resultados Reales)
+**Nota:** Los resultados siguientes pertenecen a la versión anterior con KDS. La retirada de cocina modifica las pruebas de roles y estados; deben volver a ejecutarse en CI. No se presentan como resultados de esta versión.
+
+## 1. Pruebas Automatizadas Ejecutadas (Resultados históricos)
 
 ### A. Suite de Seguridad e Integridad (`tests/security.test.ts`) — **10/10 APROBADAS**
 - `[PASS]` `server.ts` contiene 0 `cachedAdminToken` y 0 llaves privadas hardcodeadas; incluye `X-Content-Type-Options` y `Content-Security-Policy`.
@@ -40,6 +42,6 @@
 Las siguientes verificaciones requieren hardware físico o entorno Firebase en vivo y **no se reportan como ejecutadas**:
 1. Impresión física en impresora térmica real de 58mm y 80mm desde navegador Chrome/Android/Windows.
 2. Prueba en vivo de `firestore.rules` con Firebase Emulator Suite o tras aprobación de despliegue en `funky-aloe-jxq1s`.
-3. Prueba en tablet dedicada en cocina (`rol: cocina`) verificando sonido de nueva comanda y Wake Lock prolongado.
+3. Prueba de impresión y reimpresión desde POS, entrega sin estado KDS, y bloqueo de perfiles antiguos de cocina en Firebase.
 4. Prueba de corte real de Internet en el local y reconexión posterior con verificación de cola IndexedDB.
 5. Escaneo de historial Git completo en GitHub con Gitleaks (`.github/workflows/ci-security.yml`).

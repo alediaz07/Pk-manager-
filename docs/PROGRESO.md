@@ -1,5 +1,7 @@
 # Progreso de Implementación — Pollos Karen Manager
 
+> Actualización: retirada la pantalla KDS y el rol operativo de cocina. El POS imprime comandas físicas y conserva gestión de estados, caja e inventario. Los documentos históricos de cocina permanecen sin nuevas escrituras. Las referencias previas se conservan como bitácora histórica.
+
 **Última actualización**: 2026-11-25  
 **Estado general**: Conversión a aplicación 100% interna completada y verificada localmente (compilación, TypeScript, 26/26 pruebas automatizadas y escaneo de secretos en código y bundle `dist/`).
 

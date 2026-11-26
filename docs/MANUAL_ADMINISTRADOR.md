@@ -3,9 +3,9 @@
 ## 1. Inicio de Sesión y Gestión de Usuarios
 - Ingrese con su cuenta de Administrador (`role: "admin"`).
 - En **Auditoría y Usuarios**:
-  - Cree cuentas de **Colaborador** (salón/caja) o **Cocina** (tablet KDS) con contraseña segura (mínimo 8 caracteres con letras y números).
+  - Cree cuentas de **Colaborador** (salón/caja) con contraseña segura (mínimo 8 caracteres con letras y números).
   - Para acceso con Google Sign-In, cree primero una **Preautorización (Invitación)** con el correo exacto y el rol deseado. Ninguna cuenta externa puede autorregistrarse.
-  - Desactivar un usuario revoca su sesión activa en tiempo real.
+  - Desactivar un usuario revoca su sesión activa en tiempo real. Los perfiles antiguos con rol de cocina quedan bloqueados; solo reasigne expresamente a colaboradores a quienes realmente deban operar el POS.
 
 ## 2. Configuración del Local y Menú Oficial
 En **Configuración**:
