@@ -3,7 +3,9 @@
 **Fecha de ejecución**: 2026-11-25  
 **Entorno**: Sandbox Node.js v22.23.5 + TypeScript (`tsc --noEmit`) + Vite 8
 
-## 1. Pruebas Automatizadas Ejecutadas (Resultados Reales)
+**Nota de alcance:** los resultados siguientes son históricos, anteriores a la retirada del menú público. La nueva versión requiere repetir `npm run lint`, `npm test` y `npm run build`. Se sustituyeron las pruebas HTTP del menú público por comprobaciones de HTTP 410 en las seis rutas antiguas y una prueba de concurrencia de 16 pedidos rechazados. Resultados de la nueva versión: pendientes de CI.
+
+## 1. Pruebas Automatizadas Ejecutadas (Resultados Históricos)
 
 ### A. Suite de Seguridad e Integridad (`tests/security.test.ts`) — **10/10 APROBADAS**
 - `[PASS]` `server.ts` contiene 0 `cachedAdminToken` y 0 llaves privadas hardcodeadas; incluye `X-Content-Type-Options` y `Content-Security-Policy`.

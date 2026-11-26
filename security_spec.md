@@ -8,7 +8,7 @@
    - Deactivated accounts (`active == false`) are immediately rejected by both Firestore Rules (`isActiveUser()`) and real-time client profile revocation.
 2. **Three Strict Roles**:
    - `admin`: Full access to finances, inventory, recipes/costs, purchases, suppliers, operating expenses, audit logs, backups, restaurant configuration, and user administration.
-   - `colaborador`: Operational POS & cashier access (active orders, table status, confirmed payments, open register sales counters, kitchen order sync, public order authorization, non-fiscal receipt printing). **Zero read access** to `purchases`, `operating_expenses`, `suppliers`, `recipes` (contains costs), `inventory_items` (contains unit costs), `audit_logs`, or `admins` list.
+   - `colaborador`: Operational POS & cashier access (active orders, table status, confirmed payments, open register sales counters, kitchen order sync, internal order authorization, non-fiscal receipt printing). **Zero read access** to `purchases`, `operating_expenses`, `suppliers`, `recipes` (contains costs), `inventory_items` (contains unit costs), `audit_logs`, or `admins` list.
    - `cocina`: Isolated Kitchen Display System (KDS) role. **ONLY** reads sanitized `/kitchen_orders/{orderId}` (strictly zero prices, zero totals, zero payment fields) and updates preparation transitions (`in_preparation`, `ready`). **Zero access** to `/orders`, `/payments`, `/cash_registers`, `/cash_movements`, `/purchases`, `/operating_expenses`, `/recipes`, `/inventory_items`, or `/audit_logs`.
 3. **Separated Operational & Financial Lifecycles**:
    - `operationalStatus`: `pending_auth` → `authorized` → `in_preparation` → `ready` → `delivered` (or `cancelled`).
@@ -20,9 +20,9 @@
 5. **Immutable Audit Logs & Payment Records**:
    - `/audit_logs/{logId}` is strictly append-only (`update: false, delete: false`), bound to `request.auth.uid`, and cross-checked with `exists()` / `existsAfter()` against real documents.
    - `/payments/{paymentId}` is append-only for staff; only admins may record refund status updates.
-6. **Public Digital Menu & Order Isolation**:
-   - `/public_catalog/menu` exposes strictly sanitized menu data (zero costs, zero recipes, zero internal data).
-   - Public orders are price-verified server-side in `/api/public/order` and enter as `operationalStatus: 'pending_auth'`.
+6. **Internal Orders Only**:
+   - All customer-facing `/api/public/*` routes return HTTP 410 without data. No public menu, QR ordering, external tracking or approval queue exists.
+   - Orders are created through the authenticated internal POS. Historical order sources and tracking identifiers remain for compatibility, without external access.
 
 ---
 

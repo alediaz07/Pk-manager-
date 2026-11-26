@@ -85,6 +85,16 @@ async function main() {
     }
   });
 
+  await runTest('La aplicación no tiene entrada pública ni funciones de pedidos QR', () => {
+    const appSrc = fs.readFileSync(path.join(rootDir, 'src/App.tsx'), 'utf8');
+    const posSrc = fs.readFileSync(path.join(rootDir, 'src/context/POSContext.tsx'), 'utf8');
+    assert.equal(fs.existsSync(path.join(rootDir, 'src/components/public/PublicMenuView.tsx')), false);
+    assert.equal(/PublicMenuView|publicRoute/.test(appSrc), false);
+    assert.equal(appSrc.includes('if (!currentUser)'), true);
+    assert.equal(/\/api\/public\/|pendingPublicOrders|rotateTableQRToken|toggleTableQR/.test(posSrc), false);
+    assert.equal(posSrc.includes("source: 'pos'"), true);
+  });
+
   // 4. Kitchen ticket contains ZERO prices; internal receipt MUST contain NON_FISCAL_DISCLAIMER
   await runTest('Comanda de cocina omite precios y comprobante interno incluye leyenda NO FISCAL', () => {
     const sampleOrder: RestaurantOrder = {
