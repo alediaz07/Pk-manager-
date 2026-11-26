@@ -1,4 +1,6 @@
-# Progreso de Implementación — Pollos Karen Manager
+# Progreso de Implementación — Pollos Karen Manager 
+
+> Actualización posterior: se retiraron el menú público, los pedidos externos, los QR, el seguimiento externo y su autorización. Las fases anteriores se conservan como registro histórico; POS, cocina, caja y módulos administrativos permanecen.
 
 **Última actualización**: 2026-11-25  
 **Estado general**: Fases 0 a 9 completadas y verificadas localmente (compilación, TypeScript, 18/18 pruebas automatizadas y escaneo de secretos en código y bundle `dist/`).

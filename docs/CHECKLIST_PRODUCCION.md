@@ -23,5 +23,5 @@
 ## Validación Física Pendiente en Local (La Uruca)
 - [ ] Probar impresión física 58mm y 80mm en impresora térmica real.
 - [ ] Probar tablet dedicada en cocina (`rol: cocina`) durante un turno real.
-- [ ] Imprimir y laminar códigos QR de mesas tras verificar `APP_URL` definitivo.
+- [ ] Verificar que los antiguos enlaces QR no muestran menú público y que las rutas `/api/public/*` responden HTTP 410; retirar los QR impresos del local.
 - [ ] Realizar respaldo inicial JSON desde **Auditoría y Respaldos**.

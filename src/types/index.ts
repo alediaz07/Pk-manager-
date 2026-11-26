@@ -39,6 +39,7 @@ export type FinancialOrderStatus =
 
 export type PaymentStatus = 'unpaid' | 'paid' | 'partially_paid' | 'refunded';
 export type PaymentMethod = 'efectivo' | 'sinpe' | 'tarjeta' | 'mixto';
+// Legacy sources are retained for historical orders; new orders originate in POS.
 export type OrderSource = 'pos' | 'qr_mesa' | 'menu_expres';
 
 export type CasadoProtein = 'Pollo' | 'Carne' | 'Chuleta' | 'Pescado' | string;
@@ -52,9 +53,6 @@ export interface RestaurantTable {
   status: TableStatus;
   currentOrderId?: string | null;
   seats?: number;
-  qrToken?: string;
-  qrEnabled?: boolean;
-  qrRotatedAt?: string;
   updatedAt?: string;
 }
 
@@ -81,7 +79,6 @@ export interface ProductItem {
   active: boolean;
   imageUrl?: string;
   isFavorite?: boolean;
-  isPublicMenu?: boolean;
   scheduleStart?: string;
   scheduleEnd?: string;
   breakfastOnly?: boolean;
@@ -168,6 +165,7 @@ export interface RestaurantOrder {
   changeHistory?: OrderChangeLog[];
   cancellationReason?: string;
   cancellationInventoryDisposition?: 'restored' | 'waste' | 'none';
+  /** Legacy identifier retained for historical records only. */
   publicTrackingCode?: string;
   splitFromOrderId?: string;
 }
@@ -483,7 +481,6 @@ export interface RestaurantConfig {
   expressMinOrder: number;
   expressEnabled: boolean;
   expressCoverageDescription?: string;
-  qrTableOrderingEnabled: boolean;
   inventoryDeductionTrigger: 'kitchen_auth' | 'payment';
   printerWidth: '80mm' | '58mm';
   tableServicePercent?: number;
@@ -504,29 +501,3 @@ export interface RestaurantConfig {
   updatedBy?: string;
 }
 
-export interface PublicMenuProduct {
-  id: string;
-  name: string;
-  description?: string;
-  categoryId: string;
-  price: number;
-  isCasado: boolean;
-  proteinOptions?: CasadoProtein[];
-  available: boolean;
-  scheduleStart?: string;
-  scheduleEnd?: string;
-}
-
-export interface PublicCatalogSnapshot {
-  restaurantName: string;
-  location: string;
-  currency: string;
-  expressDeliveryFee: number;
-  expressMaxRadiusKm: number;
-  expressEnabled: boolean;
-  qrTableOrderingEnabled: boolean;
-  schedules: RestaurantConfig['schedules'];
-  categories: ProductCategory[];
-  products: PublicMenuProduct[];
-  updatedAt: string;
-}

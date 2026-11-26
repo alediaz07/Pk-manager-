@@ -5,7 +5,7 @@ El sistema opera con **3 roles internos estrictos** (`admin`, `colaborador`, `co
 | Funcionalidad / Módulo | Administrador (`admin`) | Colaborador (`colaborador`) | Cocina (`cocina`) |
 | --- | :---: | :---: | :---: |
 | Punto de Venta (POS) y Mesas | Total | Total | Sin acceso |
-| Autorizar pedidos QR Mesa / Exprés | Sí | Sí | Sin acceso |
+| Autorizar comandas internas hacia cocina | Sí | Sí | Sin acceso |
 | Cobrar comandas (Efectivo / SINPE / Tarjeta / Mixto / Parcial) | Sí | Sí | Sin acceso |
 | Abrir y cerrar caja diaria | Sí | Sí | Sin acceso |
 | Reabrir caja cerrada o registrar reembolso | Sí (auditado) | No | No |
@@ -19,4 +19,4 @@ El sistema opera con **3 roles internos estrictos** (`admin`, `colaborador`, `co
 | Gastos operativos | Sí | Sin acceso | Sin acceso |
 | Reportes financieros y exportación Excel CSV | Sí | Sin acceso | Sin acceso |
 | Gestión de usuarios, invitaciones, auditoría y respaldos | Sí | Sin acceso | Sin acceso |
-| Configuración del local y rotación de QR | Sí | Sin acceso | Sin acceso |
+| Configuración del local | Sí | Sin acceso | Sin acceso |

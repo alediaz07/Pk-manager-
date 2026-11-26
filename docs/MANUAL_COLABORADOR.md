@@ -12,9 +12,9 @@
 - Para los **Casados**, seleccione obligatoriamente la proteína (`Pollo`, `Carne`, `Chuleta` o `Pescado`) y agregue observaciones si el cliente solicita cambios.
 - Pulse **Guardar / Autorizar** o **Imprimir Cocina** para enviar la comanda a la pantalla KDS y a la impresora térmica de cocina.
 
-## 3. Pedidos Digitales (QR Mesa y Menú Exprés)
-- Cuando un cliente envía un pedido desde el QR de mesa o el Menú Exprés, aparecerá un aviso amarillo en la parte superior del POS.
-- Pulse **Revisar y Autorizar** para verificar el pedido y enviarlo a Cocina, o **Rechazar** si no procede. Ningún pedido digital llega directo a cocina sin su aprobación.
+## 3. Registro interno de pedidos
+- Registre todos los pedidos en POS, incluso los recibidos por teléfono o WhatsApp. No hay pedidos directos de clientes, códigos QR ni bandeja de autorización de pedidos externos.
+- Mantenga la autorización de comandas internas para enviarlas a cocina.
 
 ## 4. Gestión de Mesas, Precuenta y Cobro
 - Puede **Transferir** una comanda a otra mesa libre desde el encabezado del carrito.

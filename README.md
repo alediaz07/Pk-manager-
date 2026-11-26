@@ -1,11 +1,13 @@
 # Pollos Karen Manager
 
-Sistema interno integral de gestión operativa, punto de venta (POS), pantalla de cocina (KDS), caja general, inventario, recetas, compras, proveedores, gastos operativos, menú digital y finanzas para **Pollos Karen** (La Uruca, Costa Rica).
+Sistema interno integral de gestión operativa, punto de venta (POS), pantalla de cocina (KDS), caja general, inventario, recetas, compras, proveedores, gastos operativos, catálogo interno y finanzas para **Pollos Karen** (La Uruca, Costa Rica).
 
 - **Moneda:** Colón costarricense (`CRC ₡`)
 - **Zona horaria oficial:** `America/Costa_Rica`
 - **Horario habitual:** Lunes a viernes, 7:00 a. m. a 6:00 p. m. (desayunos de 7:00 a. m. a 10:30 a. m.; sábado y domingo cerrado)
 - **Alcance legal explícito:** Los comprobantes emitidos por el sistema son **documentos internos no fiscales**. Este sistema no implementa facturación electrónica de Hacienda, códigos CABYS ni integraciones con plataformas externas de entregas.
+
+**Acceso interno:** todos los pedidos (mesa, ventana y exprés) se registran por personal autenticado desde POS. El menú público, los QR de pedidos, el seguimiento externo y la autorización de pedidos externos se retiraron. Los enlaces anteriores ya no abren un menú y `/api/public/*` devuelve HTTP 410. Se conservan los pedidos históricos y el resto de módulos.
 
 ## Stack Tecnológico
 
@@ -18,7 +20,7 @@ Sistema interno integral de gestión operativa, punto de venta (POS), pantalla d
 ## Roles del Sistema
 
 1. **`admin` (Administrador):** Acceso total a POS, mesas, caja, inventario, recetas, catálogo, compras, proveedores, gastos operativos, dashboard financiero, auditoría, usuarios, respaldos y configuración.
-2. **`colaborador` (Colaborador / Salón y Caja):** Acceso operativo a POS, mesas, caja (cobros y movimientos permitidos), menú digital QR y tickets. Sin acceso a costos, márgenes, compras, gastos, recetas financieras ni utilidades.
+2. **`colaborador` (Colaborador / Salón y Caja):** Acceso operativo a POS, mesas, caja (cobros y movimientos permitidos), comandas internas y tickets. Sin acceso a costos, márgenes, compras, gastos, recetas financieras ni utilidades.
 3. **`cocina` (Pantalla de Cocina / KDS):** Acceso exclusivo a la pantalla de cocina con comandas sanitizadas (sin precios, totales, métodos de pago ni información financiera).
 
 ## Requisitos e Inicio Rápido
