@@ -81,11 +81,11 @@ runTest('Estado operativo y estado financiero son independientes', () => {
 });
 
 // 3. Role-based Operational State Machine transitions
-runTest('Transiciones de estado: cocina solo avanza authorized -> in_preparation -> ready y no anula', () => {
-  assert.equal(canTransitionOperationalStatus('authorized', 'in_preparation', 'cocina').allowed, true);
-  assert.equal(canTransitionOperationalStatus('in_preparation', 'ready', 'cocina').allowed, true);
+runTest('Transiciones POS: colaborador registra entrega y el rol de cocina retirado no puede operar', () => {
+  assert.equal(canTransitionOperationalStatus('authorized', 'delivered', 'colaborador').allowed, true);
+  assert.equal(canTransitionOperationalStatus('authorized', 'ready', 'colaborador').allowed, true);
+  assert.equal(canTransitionOperationalStatus('authorized', 'in_preparation', 'cocina').allowed, false);
   assert.equal(canTransitionOperationalStatus('ready', 'delivered', 'cocina').allowed, false);
-  assert.equal(canTransitionOperationalStatus('authorized', 'cancelled', 'cocina').allowed, false);
   assert.equal(canTransitionOperationalStatus('authorized', 'cancelled', 'colaborador').allowed, false);
   assert.equal(canTransitionOperationalStatus('authorized', 'cancelled', 'admin').allowed, true);
   assert.equal(canTransitionOperationalStatus('cancelled', 'authorized', 'admin').allowed, false);

@@ -51,12 +51,18 @@ async function main() {
   });
 
   // 2. Static audit of firestore.rules
-  await runTest('firestore.rules cumple deny-by-default, 3 roles, aislamiento cocina e inmutabilidad auditoría', () => {
+  await runTest('firestore.rules: 2 roles activos, KDS retirado, auditoría inmutable', () => {
     const rules = fs.readFileSync(path.join(rootDir, 'firestore.rules'), 'utf8');
     assert.equal(rules.includes('allow read, write: if false;'), true, 'Debe existir catch-all deny-by-default');
-    assert.equal(rules.includes('function isCocina()'), true, 'Debe existir función isCocina()');
+    assert.equal(rules.includes('function isCocina()'), false, 'No debe existir rol activo de cocina');
+    assert.equal(fs.existsSync(path.join(rootDir, 'src/components/kitchen/KitchenDisplayView.tsx')), false);
+    const posSource = fs.readFileSync(path.join(rootDir, 'src/context/POSContext.tsx'), 'utf8');
+    assert.equal(posSource.includes("'kitchen_orders'"), false, 'POS no debe escribir ni escuchar KDS');
+    assert.equal(posSource.includes("'kitchen_tickets'"), true, 'Debe conservar el registro de comandas impresas');
+    assert.equal(posSource.includes('printKitchenTicket(ticket, restaurantConfig.printerWidth)'), true);
+    assert.equal(rules.includes("incoming().role in ['admin', 'colaborador']"), true);
     assert.equal(rules.includes('function isActiveUser()'), true, 'Debe verificar usuario activo');
-    assert.equal(rules.includes('match /kitchen_orders/{orderId}'), true, 'Debe existir colección aislada /kitchen_orders');
+    assert.match(rules, /match \/kitchen_orders\/\{orderId\} \{\s*allow read: if isAdmin\(\);\s*allow write: if false;/);
     assert.equal(rules.includes('match /payments/{paymentId}'), true, 'Debe existir colección /payments');
     assert.equal(rules.includes('match /purchase_invoice_locks/{lockId}'), true, 'Debe existir bloqueo atómico de facturas duplicadas');
     assert.equal(rules.includes('allow update, delete: if false;'), true, 'audit_logs debe prohibir update y delete');

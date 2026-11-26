@@ -7,7 +7,7 @@
       "properties": {
         "email": { "type": "string", "maxLength": 128 },
         "displayName": { "type": "string", "maxLength": 100 },
-        "role": { "type": "string", "enum": ["admin", "colaborador", "cocina"] },
+        "role": { "type": "string", "enum": ["admin", "colaborador"], "description": "Legacy cocina profiles are blocked until explicitly reassigned." },
         "active": { "type": "boolean" },
         "createdAt": { "type": "string" },
         "updatedAt": { "type": "string" }
@@ -21,7 +21,7 @@
       "properties": {
         "email": { "type": "string", "maxLength": 128 },
         "displayName": { "type": "string", "maxLength": 100 },
-        "role": { "type": "string", "enum": ["colaborador", "cocina"] },
+        "role": { "type": "string", "enum": ["colaborador"] },
         "active": { "type": "boolean" },
         "invitedBy": { "type": "string", "maxLength": 100 },
         "createdAt": { "type": "string" }
@@ -116,25 +116,6 @@
         "paidAt": { "type": "string" }
       },
       "required": ["orderNumber", "serviceType", "items", "status", "paymentStatus", "subtotal", "serviceCharge", "total"]
-    },
-    "KitchenOrder": {
-      "title": "KitchenOrder",
-      "description": "Sanitized KDS projection strictly free of prices, totals, or payment details",
-      "type": "object",
-      "properties": {
-        "orderId": { "type": "string", "maxLength": 64 },
-        "orderNumber": { "type": "string", "maxLength": 32 },
-        "serviceType": { "type": "string", "enum": ["mesa", "ventana", "expres"] },
-        "tableName": { "type": "string", "maxLength": 50 },
-        "operationalStatus": { "type": "string", "enum": ["authorized", "in_preparation", "ready", "delivered", "cancelled"] },
-        "items": { "type": "array" },
-        "observations": { "type": "string", "maxLength": 500 },
-        "authorizedAt": { "type": "string" },
-        "startedAt": { "type": "string" },
-        "readyAt": { "type": "string" },
-        "updatedAt": { "type": "string" }
-      },
-      "required": ["orderId", "orderNumber", "serviceType", "operationalStatus", "items", "authorizedAt"]
     },
     "Payment": {
       "title": "Payment",
@@ -384,7 +365,6 @@
     "/products/{productId}": { "schema": "Product", "description": "Menu products" },
     "/tables/{tableId}": { "schema": "Table", "description": "Tables 1-7 and Barra" },
     "/orders/{orderId}": { "schema": "Order", "description": "Restaurant orders" },
-    "/kitchen_orders/{orderId}": { "schema": "KitchenOrder", "description": "Sanitized KDS orders (zero prices)" },
     "/payments/{paymentId}": { "schema": "Payment", "description": "Persistent payment transactions" },
     "/kitchen_tickets/{ticketId}": { "schema": "KitchenTicket", "description": "Thermal print audit" },
     "/cash_registers/{registerId}": { "schema": "CashRegister", "description": "Cash register shifts" },

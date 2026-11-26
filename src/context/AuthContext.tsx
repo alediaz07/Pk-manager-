@@ -32,7 +32,6 @@ interface AuthContextType {
   role: UserRole | null;
   isAdmin: boolean;
   isColaborador: boolean;
-  isCocina: boolean;
   loading: boolean;
   authBlockedMessage: string | null;
   clearAuthBlockedMessage: () => void;
@@ -144,9 +143,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           const storedRole = data.role as UserRole;
           finalRole = isAdminUser
             ? 'admin'
-            : storedRole === 'admin' || storedRole === 'colaborador' || storedRole === 'cocina'
+            : storedRole === 'admin' || storedRole === 'colaborador'
               ? storedRole
-              : 'colaborador';
+              : null;
           displayName = data.displayName || displayName;
           isActive = data.active !== false;
         } else if (isPrimaryAdmin || isAdminUser) {
@@ -173,7 +172,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               if (
                 inviteData.active !== false &&
                 inviteData.email?.toLowerCase() === userEmail &&
-                (inviteData.role === 'colaborador' || inviteData.role === 'cocina')
+                inviteData.role === 'colaborador'
               ) {
                 finalRole = inviteData.role;
                 displayName = inviteData.displayName || displayName;
@@ -251,11 +250,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               signOut(auth).catch(() => {});
               return;
             }
-            const liveRole: UserRole = isPrimaryAdmin
+            const liveRole: UserRole | null = isPrimaryAdmin
               ? 'admin'
-              : liveData.role === 'admin' || liveData.role === 'colaborador' || liveData.role === 'cocina'
+              : liveData.role === 'admin' || liveData.role === 'colaborador'
                 ? liveData.role
-                : 'colaborador';
+                : null;
+            if (!liveRole) {
+              setCurrentUser(null);
+              setAppUser(null);
+              setRole(null);
+              setAuthBlockedMessage('El rol de cocina fue retirado. Contacte al administrador si necesita acceso al POS.');
+              signOut(auth).catch(() => {});
+              return;
+            }
 
             setRole(liveRole);
             setAppUser({
@@ -361,6 +368,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       throw new Error('Solo un administrador puede crear nuevas cuentas de personal.');
     }
 
+    if (targetRole !== 'admin' && targetRole !== 'colaborador') {
+      throw new Error('El rol de cocina fue retirado.');
+    }
     const passError = validateStrongPassword(pass);
     if (passError) {
       throw new Error(passError);
@@ -418,8 +428,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (role !== 'admin') {
       throw new Error('Solo un administrador puede preautorizar correos de Google.');
     }
-    if (targetRole === 'admin') {
-      throw new Error('Por seguridad, cree cuentas de administrador directamente o promueva una cuenta verificada.');
+    if (targetRole !== 'colaborador') {
+      throw new Error('Solo se permiten invitaciones para colaboradores.');
     }
     const cleanEmail = email.trim().toLowerCase();
     const cleanName = displayName.trim();
@@ -455,6 +465,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       throw new Error('Por seguridad, no se puede degradar la cuenta del Administrador Principal.');
     }
 
+    if (newRole !== 'admin' && newRole !== 'colaborador') {
+      throw new Error('El rol de cocina fue retirado.');
+    }
     const nowIso = new Date().toISOString();
     try {
       await updateDoc(doc(db, 'users', targetUid), {
@@ -539,7 +552,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const isAdmin = role === 'admin';
   const isColaborador = role === 'colaborador';
-  const isCocina = role === 'cocina';
 
   return (
     <AuthContext.Provider
@@ -549,7 +561,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         role,
         isAdmin,
         isColaborador,
-        isCocina,
         loading,
         authBlockedMessage,
         clearAuthBlockedMessage,

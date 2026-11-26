@@ -50,15 +50,11 @@ service cloud.firestore {
     }
 
     function isActiveUser() {
-      return isAdmin() || hasActiveProfile();
+      return isAdmin() || isColaborador();
     }
 
     function isColaborador() {
       return hasActiveProfile() && userRole() == 'colaborador';
-    }
-
-    function isCocina() {
-      return hasActiveProfile() && userRole() == 'cocina';
     }
 
     function isStaff() {
@@ -75,7 +71,7 @@ service cloud.firestore {
       // Only admins can create users freely; primary admin can bootstrap self;
       // invited Google users may create ONLY their own doc matching an active admin invite.
       allow create: if isSignedIn() &&
-        incoming().role in ['admin', 'colaborador', 'cocina'] &&
+        incoming().role in ['admin', 'colaborador'] &&
         incoming().email is string && incoming().email.size() <= 128 &&
         incoming().displayName is string && incoming().displayName.size() <= 100 &&
         incoming().active is bool &&
@@ -86,7 +82,7 @@ service cloud.firestore {
             request.auth.uid == userId &&
             request.auth.token.email != null &&
             incoming().email == request.auth.token.email &&
-            incoming().role in ['colaborador', 'cocina'] &&
+            incoming().role == 'colaborador' &&
             incoming().active == true &&
             exists(/databases/$(database)/documents/user_invites/$(request.auth.token.email.lower().replace('[^a-z0-9]', '_'))) &&
             get(/databases/$(database)/documents/user_invites/$(request.auth.token.email.lower().replace('[^a-z0-9]', '_'))).data.active == true &&
@@ -95,7 +91,7 @@ service cloud.firestore {
         );
 
       allow update: if isActiveUser() && (
-        isAdmin() ||
+        (isAdmin() && (incoming().role in ['admin', 'colaborador'] || incoming().role == existing().role)) ||
         (
           request.auth.uid == userId &&
           incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'updatedAt']) &&
@@ -112,7 +108,8 @@ service cloud.firestore {
         request.auth.token.email != null &&
         inviteId == request.auth.token.email.lower().replace('[^a-z0-9]', '_')
       );
-      allow list, create, update, delete: if isAdmin();
+      allow list, delete: if isAdmin();
+      allow create, update: if isAdmin() && incoming().role == 'colaborador';
     }
 
     // 2. ADMINS (Strictly own-get or admin-only)
@@ -145,7 +142,7 @@ service cloud.firestore {
       );
     }
 
-    // 6. ORDERS (Cocina has ZERO access — Cocina reads only /kitchen_orders)
+    // 6. ORDERS (Internal staff only)
     match /orders/{orderId} {
       allow read: if isStaff();
       allow create: if isStaff() &&
@@ -198,26 +195,10 @@ service cloud.firestore {
       allow delete: if isAdmin();
     }
 
-    // 7. SANITIZED KITCHEN ORDERS (KDS — Strictly ZERO price/financial keys)
+    // 7. Retired digital kitchen projections: preserve historic data; no new writes.
     match /kitchen_orders/{orderId} {
-      allow read: if isActiveUser();
-      allow create: if isStaff() &&
-        !('total' in incoming()) &&
-        !('subtotal' in incoming()) &&
-        !('serviceCharge' in incoming()) &&
-        !('paymentMethod' in incoming()) &&
-        !('paymentStatus' in incoming()) &&
-        incoming().keys().hasAll([
-          'orderId', 'orderNumber', 'serviceType', 'operationalStatus', 'items', 'authorizedAt'
-        ]);
-      allow update: if isStaff() || (
-        isCocina() &&
-        incoming().diff(existing()).affectedKeys().hasOnly([
-          'operationalStatus', 'startedAt', 'readyAt', 'updatedAt'
-        ]) &&
-        incoming().operationalStatus in ['in_preparation', 'ready']
-      );
-      allow delete: if isAdmin();
+      allow read: if isAdmin();
+      allow write: if false;
     }
 
     // 8. PERSISTENT PAYMENTS (Append-only for staff; refunds admin-only)

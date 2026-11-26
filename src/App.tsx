@@ -14,12 +14,11 @@ import { ExpensesView } from './components/expenses/ExpensesView';
 import { RecipesView } from './components/recipes/RecipesView';
 import { DashboardView } from './components/dashboard/DashboardView';
 import { AuditView } from './components/audit/AuditView';
-import { KitchenDisplayView } from './components/kitchen/KitchenDisplayView';
 import { RestaurantConfigView } from './components/config/RestaurantConfigView';
 import { Loader2 } from 'lucide-react';
 
 function AppContent() {
-  const { currentUser, isCocina, loading } = useAuth();
+  const { currentUser, role, loading } = useAuth();
   const [activeTab, setActiveTab] = useState<NavTab>('pos');
 
   if (loading) {
@@ -37,18 +36,8 @@ function AppContent() {
   }
 
   // Strictly enforce authentication for internal application
-  if (!currentUser) {
+  if (!currentUser || (role !== 'admin' && role !== 'colaborador')) {
     return <LoginView />;
-  }
-
-  // Strict KDS isolation for Cocina role: zero access to POS, prices, cash, or admin views
-  if (isCocina) {
-    return (
-      <>
-        <KitchenDisplayView />
-        <PWAUpdatePrompt />
-      </>
-    );
   }
 
   return (
@@ -61,7 +50,6 @@ function AppContent() {
           {activeTab === 'tables' && (
             <TablesView onOpenPOSForTable={() => setActiveTab('pos')} />
           )}
-          {activeTab === 'kitchen' && <KitchenDisplayView />}
           {activeTab === 'cash' && <CashRegisterView />}
           {activeTab === 'inventory' && <InventoryView />}
           {activeTab === 'purchases' && <PurchasesView />}

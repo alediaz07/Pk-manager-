@@ -166,7 +166,7 @@ export const POSView: React.FC = () => {
     if (res.success && res.order) {
       setSaveFeedback({
         type: 'success',
-        message: `Comanda ${res.order.orderNumber} guardada e impresa.`,
+        message: `Comanda ${res.order.orderNumber} guardada; impresión solicitada.`,
       });
       printOrderTicket(res.order);
       setTimeout(() => setSaveFeedback(null), 4000);
@@ -276,7 +276,7 @@ export const POSView: React.FC = () => {
           <button
             onClick={() => setIsActiveOrdersOpen(true)}
             className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl font-bold text-xs sm:text-sm bg-gray-900 text-white hover:bg-black transition shadow-xs shrink-0"
-            title="Ver comandas activas en salón y cocina"
+            title="Ver comandas activas"
           >
             <ClipboardList className="w-4 h-4 text-amber-400" />
             <span>Comandas ({activeUnpaidOrders.length})</span>
@@ -685,7 +685,7 @@ export const POSView: React.FC = () => {
               ) : (
                 <Printer className="w-3.5 h-3.5" />
               )}
-              <span>Imprimir Cocina</span>
+              <span>Guardar e imprimir</span>
             </button>
 
             <button
@@ -698,7 +698,7 @@ export const POSView: React.FC = () => {
               ) : (
                 <Save className="w-3.5 h-3.5 text-red-600" />
               )}
-              <span>{isSavingOrder ? 'Guardando...' : 'Guardar / Autorizar'}</span>
+              <span>{isSavingOrder ? 'Guardando...' : 'Guardar comanda'}</span>
             </button>
           </div>
 

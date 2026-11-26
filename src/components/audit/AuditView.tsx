@@ -52,7 +52,7 @@ export const AuditView: React.FC = () => {
   // Pre-authorized Google Invite State
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteName, setInviteName] = useState('');
-  const [inviteRole, setInviteRole] = useState<'colaborador' | 'cocina'>('colaborador');
+  const inviteRole = 'colaborador' as const;
 
   if (!isAdmin) {
     return (
@@ -181,14 +181,14 @@ export const AuditView: React.FC = () => {
           <div>
             <div className="flex items-center gap-2">
               <span className="text-xs font-bold text-red-600 uppercase tracking-wider bg-red-50 px-2 py-0.5 rounded-md">
-                Seguridad, Usuarios (3 Roles) &amp; Respaldos
+                Seguridad, Usuarios (2 Roles) &amp; Respaldos
               </span>
             </div>
             <h1 className="text-2xl font-black text-gray-900 mt-1">
               Bitácora de Auditoría y Control de Acceso
             </h1>
             <p className="text-xs text-gray-500 mt-0.5">
-              Gestione cuentas de Administrador, Colaborador y Cocina (KDS), preautorice correos de Google y administre respaldos por lotes.
+              Gestione cuentas de Administrador y Colaborador, preautorice correos de Google y administre respaldos por lotes.
             </p>
           </div>
 
@@ -254,7 +254,7 @@ export const AuditView: React.FC = () => {
               </div>
               <div>
                 <h2 className="font-black text-base text-gray-900">
-                  Cuentas de Personal Activas (Admin / Colaborador / Cocina)
+                  Cuentas de Personal Activas (Admin / Colaborador)
                 </h2>
                 <p className="text-xs text-gray-500">
                   Cualquier persona no registrada o suspendida es bloqueada inmediatamente al intentar ingresar.
@@ -310,7 +310,7 @@ export const AuditView: React.FC = () => {
                           >
                             <option value="admin">Administrador</option>
                             <option value="colaborador">Colaborador</option>
-                            <option value="cocina">Cocina (KDS)</option>
+                             {u.role === 'cocina' && <option value="cocina" disabled>Cocina (rol retirado)</option>}
                           </select>
                         )}
                       </td>
@@ -322,7 +322,7 @@ export const AuditView: React.FC = () => {
                               : 'bg-gray-200 text-gray-600'
                           }`}
                         >
-                          {u.active !== false ? 'Activo' : 'Suspendido'}
+                          {u.role === 'cocina' ? 'Rol retirado' : u.active !== false ? 'Activo' : 'Suspendido'}
                         </span>
                       </td>
                       <td className="py-2.5 px-3 text-right">
@@ -370,14 +370,7 @@ export const AuditView: React.FC = () => {
                 placeholder="correo.google@gmail.com"
                 className="px-3 py-2 rounded-xl border border-gray-300"
               />
-              <select
-                value={inviteRole}
-                onChange={e => setInviteRole(e.target.value as 'colaborador' | 'cocina')}
-                className="px-3 py-2 rounded-xl border border-gray-300 bg-white font-bold"
-              >
-                <option value="colaborador">Colaborador (Salón/Caja)</option>
-                <option value="cocina">Cocina (KDS)</option>
-              </select>
+              <div className="px-3 py-2 rounded-xl border border-gray-200 bg-gray-50 font-bold">Colaborador (Salón/Caja)</div>
               <button
                 type="submit"
                 className="py-2 px-3 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold cursor-pointer"
@@ -515,7 +508,7 @@ export const AuditView: React.FC = () => {
         </div>
       )}
 
-      {/* Modal: Create Staff Account (3 Roles) */}
+      {/* Modal: Create Staff Account (2 Roles) */}
       {isCreateUserOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
           <form
@@ -540,7 +533,7 @@ export const AuditView: React.FC = () => {
                 required
                 value={newDisplayName}
                 onChange={e => setNewDisplayName(e.target.value)}
-                placeholder="Ej. Carlos Mora (Cocina)"
+                placeholder="Ej. Carlos Mora (Caja)"
                 className="w-full px-3 py-2 rounded-xl border border-gray-300 font-semibold"
               />
             </div>
@@ -552,7 +545,7 @@ export const AuditView: React.FC = () => {
                 required
                 value={newEmail}
                 onChange={e => setNewEmail(e.target.value)}
-                placeholder="cocina@polloskaren.cr"
+                placeholder="caja@polloskaren.cr"
                 className="w-full px-3 py-2 rounded-xl border border-gray-300 font-semibold"
               />
             </div>
@@ -579,7 +572,6 @@ export const AuditView: React.FC = () => {
                   className="w-full px-3 py-2 rounded-xl border border-gray-300 bg-white font-bold"
                 >
                   <option value="colaborador">Colaborador (Salón/Caja)</option>
-                  <option value="cocina">Cocina (Solo KDS)</option>
                   <option value="admin">Administrador (Total)</option>
                 </select>
               </div>

@@ -97,7 +97,7 @@ export const ActiveOrdersModal: React.FC<ActiveOrdersModalProps> = ({
               Comandas Activas en Salón y Despacho ({activeOrders.length})
             </h2>
             <p className="text-xs text-gray-500 mt-0.5">
-              Toque una comanda para verla en pantalla, actualizar su estado de cocina o proceder al cobro.
+              Toque una comanda para verla en pantalla, registrar su estado desde el POS o proceder al cobro.
             </p>
           </div>
           <button
