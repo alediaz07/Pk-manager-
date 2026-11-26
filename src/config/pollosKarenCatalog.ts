@@ -72,7 +72,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
     isFavorite: true,
     scheduleStart: '07:00',
     scheduleEnd: '10:30',
@@ -86,7 +85,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
     isFavorite: true,
     scheduleStart: '07:00',
     scheduleEnd: '10:30',
@@ -100,7 +98,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
     scheduleStart: '07:00',
     scheduleEnd: '10:30',
   },
@@ -113,7 +110,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
     scheduleStart: '07:00',
     scheduleEnd: '10:30',
   },
@@ -126,7 +122,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
     scheduleStart: '07:00',
     scheduleEnd: '10:30',
   },
@@ -139,7 +134,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
     scheduleStart: '07:00',
     scheduleEnd: '10:30',
   },
@@ -152,7 +146,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
     scheduleStart: '07:00',
     scheduleEnd: '10:30',
   },
@@ -165,7 +158,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
     scheduleStart: '07:00',
     scheduleEnd: '10:30',
   },
@@ -178,7 +170,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
     scheduleStart: '07:00',
     scheduleEnd: '10:30',
   },
@@ -191,7 +182,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
     scheduleStart: '07:00',
     scheduleEnd: '10:30',
   },
@@ -204,7 +194,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
     scheduleStart: '07:00',
     scheduleEnd: '10:30',
   },
@@ -217,7 +206,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
     scheduleStart: '07:00',
     scheduleEnd: '10:30',
   },
@@ -230,7 +218,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
     scheduleStart: '07:00',
     scheduleEnd: '10:30',
   },
@@ -243,7 +230,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
     isFavorite: true,
     scheduleStart: '07:00',
     scheduleEnd: '10:30',
@@ -257,7 +243,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
     scheduleStart: '07:00',
     scheduleEnd: '10:30',
   },
@@ -270,7 +255,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
     scheduleStart: '07:00',
     scheduleEnd: '10:30',
   },
@@ -283,7 +267,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
     scheduleStart: '07:00',
     scheduleEnd: '10:30',
   },
@@ -296,7 +279,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
     scheduleStart: '07:00',
     scheduleEnd: '10:30',
   },
@@ -312,7 +294,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     proteinOptions: ['Pollo', 'Carne', 'Chuleta', 'Pescado'],
     available: true,
     active: true,
-    isPublicMenu: true,
     isFavorite: true,
   },
   {
@@ -325,7 +306,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     proteinOptions: ['Pollo', 'Carne', 'Chuleta', 'Pescado'],
     available: true,
     active: true,
-    isPublicMenu: true,
     isFavorite: true,
   },
   {
@@ -337,7 +317,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
   },
 
   // ================= PLATOS DEL DÍA =================
@@ -350,7 +329,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
     isFavorite: true,
   },
   {
@@ -362,7 +340,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
   },
   {
     id: 'pk-dia-pasta-pollo',
@@ -373,7 +350,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
   },
   {
     id: 'pk-dia-sopa-azteca',
@@ -384,7 +360,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
   },
   {
     id: 'pk-dia-chifrijo',
@@ -395,7 +370,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
     isFavorite: true,
   },
   {
@@ -407,7 +381,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
   },
   {
     id: 'pk-dia-arroz-camarones',
@@ -418,7 +391,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
   },
   {
     id: 'pk-dia-olla-carne',
@@ -429,7 +401,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
   },
   {
     id: 'pk-dia-cordon-bleu',
@@ -440,7 +411,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
   },
   {
     id: 'pk-dia-fajitas-mixtas',
@@ -451,7 +421,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
   },
   {
     id: 'pk-dia-lomo-relleno',
@@ -462,7 +431,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
   },
   {
     id: 'pk-dia-costilla-cerdo',
@@ -473,7 +441,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
   },
   {
     id: 'pk-dia-ceviche-pescado',
@@ -484,7 +451,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
   },
   {
     id: 'pk-dia-arroz-mariscos',
@@ -495,7 +461,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
   },
   {
     id: 'pk-dia-sopa-mariscos',
@@ -506,7 +471,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
   },
 
   // ================= COMIDAS RÁPIDAS =================
@@ -519,7 +483,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
   },
   {
     id: 'pk-rap-taco-arreglado',
@@ -530,7 +493,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
   },
   {
     id: 'pk-rap-taco-papas',
@@ -541,7 +503,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
   },
   {
     id: 'pk-rap-perro-caliente',
@@ -552,7 +513,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
   },
   {
     id: 'pk-rap-perro-papas',
@@ -563,7 +523,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
   },
   {
     id: 'pk-rap-salchipapas',
@@ -574,7 +533,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
   },
   {
     id: 'pk-rap-papas-supremas',
@@ -585,7 +543,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
   },
   {
     id: 'pk-rap-hamburguesa-sencilla',
@@ -596,7 +553,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
   },
   {
     id: 'pk-rap-hamburguesa-papas',
@@ -607,7 +563,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
     isFavorite: true,
   },
   {
@@ -619,7 +574,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
   },
   {
     id: 'pk-rap-quesadilla',
@@ -630,7 +584,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
   },
   {
     id: 'pk-rap-quesadilla-papas',
@@ -641,7 +594,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
   },
   {
     id: 'pk-rap-nachos',
@@ -652,7 +604,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
   },
   {
     id: 'pk-rap-burrito',
@@ -663,7 +614,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
   },
   {
     id: 'pk-rap-burrito-papas',
@@ -674,7 +624,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
   },
   {
     id: 'pk-rap-patacones-arreglados',
@@ -685,7 +634,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
   },
   {
     id: 'pk-rap-patacones-sencillos',
@@ -696,7 +644,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
   },
 
   // ================= OTROS Y BEBIDAS =================
@@ -709,7 +656,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
     isFavorite: true,
   },
   {
@@ -721,7 +667,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
   },
   {
     id: 'pk-otr-te-frio',
@@ -732,7 +677,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
   },
   {
     id: 'pk-otr-batidos-agua',
@@ -743,7 +687,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
   },
   {
     id: 'pk-otr-batidos-leche',
@@ -754,7 +697,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
   },
   {
     id: 'pk-otr-hamburguesa-artesanal',
@@ -765,7 +707,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
   },
   {
     id: 'pk-otr-pollo-entero',
@@ -776,7 +717,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
     isFavorite: true,
   },
   {
@@ -788,7 +728,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
     isFavorite: true,
   },
   {
@@ -800,7 +739,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
     isFavorite: true,
   },
   {
@@ -812,7 +750,6 @@ export const POLLOS_KAREN_OFFICIAL_PRODUCTS: ProductItem[] = [
     isCasado: false,
     available: true,
     active: true,
-    isPublicMenu: true,
   },
 ];
 

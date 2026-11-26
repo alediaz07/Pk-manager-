@@ -36,7 +36,7 @@ interface SidebarProps {
 
 export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => {
   const { isAdmin } = useAuth();
-  const { kitchenOrders, pendingPublicOrders, hasOpenCashRegister } = usePOS();
+  const { kitchenOrders, hasOpenCashRegister } = usePOS();
 
   const activeKitchenCount = kitchenOrders.filter(
     k => k.operationalStatus === 'authorized' || k.operationalStatus === 'in_preparation'
@@ -53,8 +53,6 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
       id: 'pos',
       label: 'Punto de Venta',
       icon: Store,
-      badge: pendingPublicOrders.length > 0 ? pendingPublicOrders.length : undefined,
-      badgeColor: 'bg-purple-600 text-white',
     },
     { id: 'tables', label: 'Mesas & Barra', icon: LayoutGrid },
     {
@@ -80,7 +78,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
     { id: 'recipes', label: 'Recetas & Costos', icon: ChefHat },
     { id: 'dashboard', label: 'Dashboard Financiero', icon: TrendingUp },
     { id: 'audit', label: 'Auditoría & Usuarios', icon: FileSpreadsheet },
-    { id: 'config', label: 'Configuración & QR', icon: Settings },
+    { id: 'config', label: 'Configuración', icon: Settings },
   ];
 
   return (

@@ -7,11 +7,10 @@
   - Para acceso con Google Sign-In, cree primero una **Preautorización (Invitación)** con el correo exacto y el rol deseado. Ninguna cuenta externa puede autorregistrarse.
   - Desactivar un usuario revoca su sesión activa en tiempo real.
 
-## 2. Configuración del Local, Menú Oficial y Códigos QR
-En **Configuración & QR**:
+## 2. Configuración del Local y Menú Oficial
+En **Configuración**:
 - Ajuste horarios (`America/Costa_Rica`), tarifa de envío Exprés (₡500 por defecto), radio de cobertura (1 km), ancho de impresora térmica (`80mm` o `58mm`) y disparador de descuento de inventario (`kitchen_auth` o `payment`).
 - Use **Importar / Sincronizar Menú Oficial** para cargar o actualizar sin sobrescribir innecesariamente el catálogo de Pollos Karen (Desayunos 7:00–10:30, Casados, Platos del Día, Comidas Rápidas y Bebidas).
-- Genere, descargue o rote los códigos QR de cada mesa y del Menú Exprés. Al rotar el token de una mesa, el QR anterior queda invalidado de inmediato.
 
 ## 3. Compras, Proveedores, CxP e Inventario
 - En **Compras**: escanee facturas con Gemini AI (siempre requiere revisión manual antes de confirmar) o regístrelas manualmente. El bloqueo atómico impide registrar dos veces la misma factura (`proveedor + número`).

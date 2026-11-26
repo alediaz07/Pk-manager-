@@ -158,6 +158,8 @@ service cloud.firestore {
         incoming().subtotal is number && incoming().subtotal >= 0 &&
         incoming().serviceCharge is number && incoming().serviceCharge >= 0 &&
         incoming().total is number && incoming().total >= 0 &&
+        (!('source' in incoming()) || incoming().source == 'pos') &&
+        !('publicTrackingCode' in incoming()) &&
         (!('observations' in incoming()) || (incoming().observations is string && incoming().observations.size() <= 1000));
 
       allow update: if isAdmin() || (
@@ -348,7 +350,7 @@ service cloud.firestore {
           'reopen_register', 'cash_count', 'inventory_adjustment', 'add_expense', 'pay_expense',
           'waste_registration', 'waste_record', 'purchase_registered', 'add_purchase',
           'credit_payment', 'toggle_active', 'cash_movement', 'data_restore', 'save_recipe',
-          'toggle_recipe_autodeduct', 'save_product', 'manage_user', 'update_config', 'rotate_qr'
+          'toggle_recipe_autodeduct', 'save_product', 'manage_user', 'update_config'
         ] &&
         (
           exists(/databases/$(database)/documents/$(incoming().collection)/$(incoming().documentId)) ||
@@ -361,7 +363,7 @@ service cloud.firestore {
             'inventory_adjustment', 'add_expense', 'pay_expense', 'purchase_registered',
             'add_purchase', 'credit_payment', 'data_restore', 'save_recipe',
             'toggle_recipe_autodeduct', 'save_product', 'manage_user', 'waste_record',
-            'update_config', 'rotate_qr'
+            'update_config'
           ])
         ) &&
         incoming().action is string && incoming().action.size() > 0 && incoming().action.size() <= 64 &&

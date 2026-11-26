@@ -1,6 +1,6 @@
 # Pollos Karen Manager
 
-Sistema interno integral de gestión operativa, punto de venta (POS), pantalla de cocina (KDS), caja general, inventario, recetas, compras, proveedores, gastos operativos, menú digital y finanzas para **Pollos Karen** (La Uruca, Costa Rica).
+Sistema de uso exclusivamente interno para la gestión operativa, punto de venta (POS), pantalla de cocina (KDS), caja general, inventario, recetas, compras, proveedores, gastos operativos y finanzas de **Pollos Karen** (La Uruca, Costa Rica).
 
 - **Moneda:** Colón costarricense (`CRC ₡`)
 - **Zona horaria oficial:** `America/Costa_Rica`
@@ -18,7 +18,7 @@ Sistema interno integral de gestión operativa, punto de venta (POS), pantalla d
 ## Roles del Sistema
 
 1. **`admin` (Administrador):** Acceso total a POS, mesas, caja, inventario, recetas, catálogo, compras, proveedores, gastos operativos, dashboard financiero, auditoría, usuarios, respaldos y configuración.
-2. **`colaborador` (Colaborador / Salón y Caja):** Acceso operativo a POS, mesas, caja (cobros y movimientos permitidos), menú digital QR y tickets. Sin acceso a costos, márgenes, compras, gastos, recetas financieras ni utilidades.
+2. **`colaborador` (Colaborador / Salón y Caja):** Acceso operativo a POS (Mesa, Ventana y Exprés manual), mesas, caja (cobros y movimientos permitidos) y tickets. Sin acceso a costos, márgenes, compras, gastos, recetas financieras ni utilidades.
 3. **`cocina` (Pantalla de Cocina / KDS):** Acceso exclusivo a la pantalla de cocina con comandas sanitizadas (sin precios, totales, métodos de pago ni información financiera).
 
 ## Requisitos e Inicio Rápido

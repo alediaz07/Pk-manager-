@@ -15,7 +15,8 @@
   - `Permissions-Policy` restrictiva
   - `Content-Security-Policy` compatible con iframe de Google AI Studio y Firebase/Google Fonts.
 - **CORS restrictivo**: validado contra `ALLOWED_ORIGINS` (`APP_URL` y orígenes locales de desarrollo).
-- **Rate limiting en memoria** en endpoints sensibles (`/api/scan-invoice`, `/api/public/order`, `/api/ai/*`).
+- **Rate limiting en memoria** en endpoints sensibles (`/api/scan-invoice`, `/api/ai/*`).
+- **Bloqueo permanente de APIs públicas**: todas las rutas históricas `/api/public/*` responden `HTTP 410 Gone` sin revelar datos ni aceptar pedidos externos.
 - **Prevención de Prompt Injection**: el escaneo de facturas con Gemini (`/api/scan-invoice`) trata el texto extraído como datos no confiables con salida JSON estrictamente validada y sanitizada.
 - **Errores sanitizados**: ningún stack trace ni detalle interno se devuelve en respuestas HTTP `500`.
 
@@ -24,6 +25,7 @@
 - **Cocina (`isCocina()`)**: acceso exclusivo de lectura y actualización controlada (`operationalStatus`, `startedAt`, `readyAt`, `updatedAt`) únicamente en `/kitchen_orders` y lectura de `/restaurant_config/main`. Sin acceso a `/orders`, `/payments`, `/cash_registers`, `/recipes`, `/inventory_items`, `/purchases`, `/operating_expenses` ni `/audit_logs`.
 - **Colaborador (`isColaborador()`)**: operación POS, mesas, cobros y cierre de caja; lectura de `/recipe_formulas` (sin costos) para descuento delta de inventario; sin acceso de lectura a `/recipes` (costos/márgenes), `/purchases`, `/operating_expenses` ni `/audit_logs`.
 - **Auditoría inmutable**: `/audit_logs` permite únicamente `create` vinculado al `request.auth.uid`, correo autenticado y documento real existente; `update` y `delete` están bloqueados (`if false`).
+- **Pedidos exclusivamente internos**: `/orders` exige personal autenticado (`isStaff()`), `source == 'pos'` y rechaza `publicTrackingCode` en pedidos nuevos, preservando compatibilidad de lectura con registros históricos.
 - **Bloqueo concurrente de facturas duplicadas**: `/purchase_invoice_locks/{vendor__invoice}` exige `!exists(...)` atómicamente en `writeBatch`.
 
 ## 4. Documentos Internos No Fiscales

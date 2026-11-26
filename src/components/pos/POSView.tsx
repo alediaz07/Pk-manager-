@@ -34,7 +34,6 @@ import {
   Ban,
   FilePlus2,
   ArrowRightLeft,
-  BellRing,
   Receipt,
   PackageCheck,
 } from 'lucide-react';
@@ -47,9 +46,6 @@ export const POSView: React.FC = () => {
     selectedTable,
     selectTable,
     orders,
-    pendingPublicOrders,
-    acceptPublicOrder,
-    rejectPublicOrder,
     restaurantConfig,
     currentOrder,
     setCurrentOrder,
@@ -75,7 +71,6 @@ export const POSView: React.FC = () => {
   const [casadoModalProduct, setCasadoModalProduct] = useState<ProductItem | null>(null);
   const [isPaymentModalOpen, setIsPaymentModalOpen] = useState<boolean>(false);
   const [isActiveOrdersOpen, setIsActiveOrdersOpen] = useState<boolean>(false);
-  const [isPendingPublicOpen, setIsPendingPublicOpen] = useState<boolean>(false);
   const [isTransferModalOpen, setIsTransferModalOpen] = useState<boolean>(false);
   const [transferTargetTableId, setTransferTargetTableId] = useState<string>('');
   const [orderToPay, setOrderToPay] = useState<RestaurantOrder | null>(null);
@@ -287,25 +282,6 @@ export const POSView: React.FC = () => {
             <span>Comandas ({activeUnpaidOrders.length})</span>
           </button>
         </div>
-
-        {/* Pending Public QR / Exprés Approval Banner */}
-        {pendingPublicOrders.length > 0 && (
-          <div className="mb-3 bg-amber-50 border border-amber-300 rounded-2xl p-3 flex items-center justify-between gap-2 text-xs">
-            <div className="flex items-center gap-2 font-bold text-amber-950">
-              <BellRing className="w-4 h-4 text-amber-600 animate-bounce shrink-0" />
-              <span>
-                {pendingPublicOrders.length} pedido(s) nuevo(s) desde Menú Digital / QR esperando autorización para cocina.
-              </span>
-            </div>
-            <button
-              type="button"
-              onClick={() => setIsPendingPublicOpen(true)}
-              className="px-3 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-black text-xs shrink-0 transition"
-            >
-              Revisar y Autorizar
-            </button>
-          </div>
-        )}
 
         {/* Mesa Picker Selector when service is Mesa */}
         {activeServiceType === 'mesa' && (
@@ -848,103 +824,6 @@ export const POSView: React.FC = () => {
           ticket={activeTicketToPrint}
           onClose={() => setActiveTicketToPrint(null)}
         />
-      )}
-
-      {/* Pending Public QR / Exprés Orders Approval Modal */}
-      {isPendingPublicOpen && (
-        <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/60 p-4">
-          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-4 max-h-[85vh] overflow-y-auto text-xs">
-            <div className="flex items-center justify-between pb-3 border-b border-gray-100">
-              <div>
-                <h3 className="font-black text-lg text-gray-900">
-                  Pedidos Pendientes (QR Mesa / Exprés)
-                </h3>
-                <p className="text-[11px] text-gray-500">
-                  Ningún pedido digital entra a cocina sin su autorización explícita.
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setIsPendingPublicOpen(false)}
-                className="px-2.5 py-1 rounded-xl bg-gray-100 font-bold text-gray-700"
-              >
-                Cerrar
-              </button>
-            </div>
-
-            {pendingPublicOrders.length === 0 ? (
-              <p className="text-center text-gray-400 py-8">No hay pedidos pendientes.</p>
-            ) : (
-              <div className="space-y-3">
-                {pendingPublicOrders.map(po => (
-                  <div
-                    key={po.trackingCode}
-                    className="bg-amber-50/70 border border-amber-200 rounded-2xl p-4 space-y-2"
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="font-black text-sm text-gray-900">
-                        {po.trackingCode} •{' '}
-                        {po.serviceType === 'mesa' ? po.tableName || 'Mesa QR' : 'Pedido Exprés'}
-                      </span>
-                      <span className="font-black text-sm text-red-600">{formatCRC(po.total)}</span>
-                    </div>
-
-                    <div className="text-gray-700 space-y-0.5">
-                      {po.items.map((it, idx) => (
-                        <div key={idx}>
-                          <strong>{it.quantity}x</strong> {it.name}
-                          {it.protein ? ` (${it.protein})` : ''}
-                          {it.notes ? ` — ${it.notes}` : ''}
-                        </div>
-                      ))}
-                    </div>
-
-                    {po.deliveryDetails && (
-                      <div className="bg-white p-2 rounded-xl border border-amber-200 text-[11px] text-gray-700">
-                        <strong>Cliente:</strong> {po.deliveryDetails.customerName} ({po.deliveryDetails.customerPhone})<br />
-                        <strong>Dirección:</strong> {po.deliveryDetails.address}
-                      </div>
-                    )}
-
-                    <div className="flex items-center gap-2 pt-2">
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          await rejectPublicOrder(po.trackingCode);
-                          setSaveFeedback({ type: 'success', message: `Pedido ${po.trackingCode} rechazado.` });
-                        }}
-                        className="flex-1 py-2 rounded-xl border border-red-300 text-red-700 font-bold hover:bg-red-50"
-                      >
-                        Rechazar
-                      </button>
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          const res = await acceptPublicOrder(po.trackingCode);
-                          if (res.success && res.order) {
-                            setSaveFeedback({
-                              type: 'success',
-                              message: `Pedido ${po.trackingCode} autorizado como ${res.order.orderNumber} y enviado a Cocina.`,
-                            });
-                            if (pendingPublicOrders.length <= 1) setIsPendingPublicOpen(false);
-                          } else {
-                            setSaveFeedback({
-                              type: 'error',
-                              message: res.error || 'No se pudo autorizar el pedido.',
-                            });
-                          }
-                        }}
-                        className="flex-1 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-black shadow-xs"
-                      >
-                        Autorizar a Cocina
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
       )}
 
       {/* Transfer Table Modal */}

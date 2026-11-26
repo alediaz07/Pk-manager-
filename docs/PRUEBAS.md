@@ -14,8 +14,8 @@
 - `[PASS]` `GET /api/health` responde `200` con cabeceras de seguridad y sin filtrar secretos.
 - `[PASS]` `POST /api/scan-invoice` rechaza solicitudes sin token Bearer (`401`).
 - `[PASS]` `GET /api/ai/sales-summary` rechaza solicitudes sin `X-Jarvis-Key` válida (`401`/`503`).
-- `[PASS]` `GET /api/public/menu` responde fail-closed (`503`) antes de sincronizar o catálogo sin costos/PII.
-- `[PASS]` `POST /api/public/order` rechaza QR de mesa con token inválido (`400`/`403`/`503`).
+- `[PASS]` `GET /api/public/menu`, `/api/public/order-status/*` y `/api/public/pending-orders` responden `410 Gone` sin exponer datos.
+- `[PASS]` `POST /api/public/order` y `/api/public/catalog-sync` responden `410 Gone` bloqueando cualquier pedido externo; verificado también que `PublicMenuView.tsx` y `qrcode` fueron eliminados y `firestore.rules` exige `source == 'pos'` para pedidos nuevos.
 
 ### B. Suite Operativa (`tests/operations.test.ts`) — **8/8 APROBADAS**
 - `[PASS]` Reglas de totales: Mesa `+10%`, Ventana `0%`, Exprés tarifa configurable (`₡500`).
@@ -27,7 +27,10 @@
 - `[PASS]` Validación de horario `America/Costa_Rica` (L–V, ventana de desayunos 07:00–10:30 y cierre domingo).
 - `[PASS]` Integridad del catálogo oficial de Pollos Karen (categorías, precios >0 y casados con proteína).
 
-### C. Verificación Estática, Compilación y Escaneo de Secretos
+### C. Suite de Concurrencia e Idempotencia (`tests/concurrency.test.ts`) — **8/8 APROBADAS**
+- `[PASS]` Doble cobro concurrente, sobrepago, pago mixto/parcial, idempotencia de sincronización offline, inventario delta sin doble descuento, bloqueo de facturas duplicadas, cierre concurrente de caja y ráfaga de 16 peticiones concurrentes a `/api/public/order` devolviendo 100% `HTTP 410 Gone`.
+
+### D. Verificación Estática, Compilación y Escaneo de Secretos
 - `npm run lint` (`tsc --noEmit`): **APROBADO (0 errores)**.
 - `npm run build` (`vite build`): **APROBADO**.
 - `npm run scan:secrets`: **`[SECRET SCAN OK] Cero secretos privados expuestos (código fuente)`**.

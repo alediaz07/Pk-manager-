@@ -25,7 +25,6 @@ export const DEFAULT_RESTAURANT_CONFIG: RestaurantConfig = {
   expressMinOrder: 0,
   expressEnabled: true,
   expressCoverageDescription: '1 km alrededor del local en La Uruca',
-  qrTableOrderingEnabled: true,
   inventoryDeductionTrigger: 'kitchen_auth',
   printerWidth: '80mm',
   tableServicePercent: 10,

@@ -62,6 +62,12 @@ async function main() {
     assert.equal(rules.includes('allow update, delete: if false;'), true, 'audit_logs debe prohibir update y delete');
     assert.equal(rules.includes('match /recipes/{recipeId}'), true, 'Debe proteger /recipes');
     assert.equal(rules.includes('match /recipe_formulas/{recipeId}'), true, 'Debe existir proyección sin costos /recipe_formulas');
+    assert.equal(rules.includes("incoming().source == 'pos'"), true, 'Los pedidos nuevos deben exigir origen interno pos');
+    assert.equal(rules.includes("!('publicTrackingCode' in incoming())"), true, 'Los pedidos nuevos no deben aceptar publicTrackingCode');
+    assert.equal(rules.includes("'rotate_qr'"), false, 'rotate_qr debe haberse eliminado de audit_logs');
+    assert.equal(fs.existsSync(path.join(rootDir, 'src/components/public/PublicMenuView.tsx')), false, 'PublicMenuView.tsx no debe existir');
+    const pkg = JSON.parse(fs.readFileSync(path.join(rootDir, 'package.json'), 'utf8'));
+    assert.equal(Boolean(pkg.dependencies?.qrcode || pkg.dependencies?.['@types/qrcode']), false, 'qrcode no debe estar en package.json');
   });
 
   // 3. Static audit: zero window.open / window.alert / window.confirm in src/
@@ -196,29 +202,39 @@ async function main() {
       assert.ok(res.status === 401 || res.status === 503, `Esperado 401 o 503, recibido ${res.status}`);
     });
 
-    await runTest('GET /api/public/menu responde fail-closed (503) o catálogo sin costos ni PII', async () => {
-      const res = await fetch(`${baseUrl}/api/public/menu`);
-      assert.ok(res.status === 200 || res.status === 503, `Esperado 200 o 503, recibido ${res.status}`);
-      const body = await res.json();
-      const serialized = JSON.stringify(body);
-      assert.equal(serialized.includes('averageCost'), false, 'Menú público no debe exponer costos de inventario');
-      assert.equal(serialized.includes('calculatedCost'), false, 'Menú público no debe exponer costos de recetas');
+    await runTest('GET /api/public/menu y /api/public/order-status responden 410 Gone sin exponer datos', async () => {
+      const [menuRes, statusRes, pendingRes] = await Promise.all([
+        fetch(`${baseUrl}/api/public/menu`),
+        fetch(`${baseUrl}/api/public/order-status/PK-TEST`),
+        fetch(`${baseUrl}/api/public/pending-orders`),
+      ]);
+      assert.equal(menuRes.status, 410, `GET /api/public/menu debe devolver 410, recibido ${menuRes.status}`);
+      assert.equal(statusRes.status, 410, `GET /api/public/order-status debe devolver 410, recibido ${statusRes.status}`);
+      assert.equal(pendingRes.status, 410, `GET /api/public/pending-orders debe devolver 410, recibido ${pendingRes.status}`);
+      const body = await menuRes.json();
+      assert.equal(body.success, false);
+      assert.equal('catalog' in body, false, 'No debe devolver catálogo');
     });
 
-    await runTest('POST /api/public/order rechaza mesa QR sin catálogo o con token inválido (400/403/503)', async () => {
-      const res = await fetch(`${baseUrl}/api/public/order`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          serviceType: 'mesa',
-          tableToken: 'token-falso-inexistente',
-          items: [{ productId: 'prod-casado', quantity: 1, selectedProtein: 'Pollo' }],
+    await runTest('POST /api/public/order y /api/public/catalog-sync responden 410 Gone y bloquean pedidos externos', async () => {
+      const [orderRes, syncRes] = await Promise.all([
+        fetch(`${baseUrl}/api/public/order`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            serviceType: 'mesa',
+            tableToken: 'token-falso-inexistente',
+            items: [{ productId: 'prod-casado', quantity: 1, selectedProtein: 'Pollo' }],
+          }),
         }),
-      });
-      assert.ok(
-        res.status === 400 || res.status === 403 || res.status === 503,
-        `Esperado 400/403/503 para token QR inválido, recibido ${res.status}`
-      );
+        fetch(`${baseUrl}/api/public/catalog-sync`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ categories: [], products: [] }),
+        }),
+      ]);
+      assert.equal(orderRes.status, 410, `POST /api/public/order debe devolver 410, recibido ${orderRes.status}`);
+      assert.equal(syncRes.status, 410, `POST /api/public/catalog-sync debe devolver 410, recibido ${syncRes.status}`);
     });
   } finally {
     await new Promise<void>(resolve => server.close(() => resolve()));

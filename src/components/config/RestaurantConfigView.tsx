@@ -1,5 +1,4 @@
 import React, { useState, useEffect } from 'react';
-import QRCode from 'qrcode';
 import { usePOS } from '../../context/POSContext';
 import { useAuth } from '../../context/AuthContext';
 import { formatCRC } from '../../utils/formatters';
@@ -8,14 +7,9 @@ import {
   Settings,
   Clock,
   Printer,
-  QrCode,
-  RefreshCw,
   CheckCircle2,
-  Download,
-  Bike,
   UtensilsCrossed,
   ShieldAlert,
-  Copy,
 } from 'lucide-react';
 
 export const RestaurantConfigView: React.FC = () => {
@@ -23,9 +17,6 @@ export const RestaurantConfigView: React.FC = () => {
   const {
     restaurantConfig,
     updateRestaurantConfig,
-    tables,
-    rotateTableQRToken,
-    toggleTableQR,
     importPollosKarenOfficialMenu,
   } = usePOS();
 
@@ -34,46 +25,10 @@ export const RestaurantConfigView: React.FC = () => {
   const [feedback, setFeedback] = useState<string | null>(null);
   const [importUpdatePrices, setImportUpdatePrices] = useState(false);
   const [importing, setImporting] = useState(false);
-  const [qrPreviews, setQrPreviews] = useState<Record<string, string>>({});
-  const [expresQrUrl, setExpresQrUrl] = useState<string>('');
 
   useEffect(() => {
     setForm(restaurantConfig);
   }, [restaurantConfig]);
-
-  const baseUrl =
-    typeof window !== 'undefined' ? `${window.location.origin}${window.location.pathname}` : '';
-
-  useEffect(() => {
-    let active = true;
-    (async () => {
-      const map: Record<string, string> = {};
-      for (const tbl of tables) {
-        if (tbl.qrToken) {
-          const url = `${baseUrl}?menu=table&token=${encodeURIComponent(tbl.qrToken)}`;
-          try {
-            map[tbl.id] = await QRCode.toDataURL(url, { width: 220, margin: 1 });
-          } catch {
-            // ignore
-          }
-        }
-      }
-      if (active) setQrPreviews(map);
-
-      try {
-        const expDataUrl = await QRCode.toDataURL(`${baseUrl}?menu=expres`, {
-          width: 220,
-          margin: 1,
-        });
-        if (active) setExpresQrUrl(expDataUrl);
-      } catch {
-        // ignore
-      }
-    })();
-    return () => {
-      active = false;
-    };
-  }, [tables, baseUrl]);
 
   if (!isAdmin) {
     return (
@@ -115,22 +70,13 @@ export const RestaurantConfigView: React.FC = () => {
     }
   };
 
-  const copyLink = async (url: string) => {
-    try {
-      await navigator.clipboard.writeText(url);
-      setFeedback('Enlace copiado al portapapeles.');
-    } catch {
-      setFeedback(url);
-    }
-  };
-
   return (
     <div className="p-4 md:p-6 max-w-6xl mx-auto space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-xl font-black text-gray-900 flex items-center gap-2">
             <Settings className="w-5 h-5 text-red-600" />
-            <span>Configuración Operativa, Catálogo Oficial y Códigos QR</span>
+            <span>Configuración Operativa y Catálogo Oficial</span>
           </h1>
           <p className="text-xs text-gray-500">
             Pollos Karen — La Uruca, Costa Rica • Zona horaria America/Costa_Rica
@@ -304,119 +250,6 @@ export const RestaurantConfigView: React.FC = () => {
               <div className="text-red-600 font-black">{formatCRC(p.price)}</div>
             </div>
           ))}
-        </div>
-      </div>
-
-      {/* 3. Digital Menu QR Codes (Tables & Exprés) */}
-      <div className="bg-white rounded-2xl border border-gray-200 p-5 shadow-xs space-y-4">
-        <div className="border-b border-gray-100 pb-3">
-          <h2 className="text-sm font-black text-gray-900 flex items-center gap-2">
-            <QrCode className="w-4 h-4 text-red-600" />
-            <span>Códigos QR para Mesas y Menú Exprés</span>
-          </h2>
-          <p className="text-xs text-gray-500">
-            Cada mesa usa un token aleatorio revocable. Todos los pedidos QR entran en espera hasta que recepción los autorice hacia cocina.
-          </p>
-        </div>
-
-        {/* Exprés Card */}
-        <div className="p-4 rounded-2xl bg-purple-50 border border-purple-200 flex flex-wrap items-center justify-between gap-4">
-          <div className="space-y-1">
-            <div className="font-black text-sm text-purple-900 flex items-center gap-1.5">
-              <Bike className="w-4 h-4" />
-              <span>Menú Público Exprés (La Uruca — 1 km)</span>
-            </div>
-            <p className="text-xs text-purple-700">
-              Sin recargo del 10% • Tarifa de envío actual: {formatCRC(restaurantConfig.expressDeliveryFee)}
-            </p>
-            <div className="flex gap-2 pt-1">
-              <button
-                type="button"
-                onClick={() => copyLink(`${baseUrl}?menu=expres`)}
-                className="px-3 py-1.5 rounded-lg bg-purple-700 text-white text-xs font-bold inline-flex items-center gap-1 cursor-pointer"
-              >
-                <Copy className="w-3.5 h-3.5" />
-                Copiar enlace Exprés
-              </button>
-              {expresQrUrl && (
-                <a
-                  href={expresQrUrl}
-                  download="QR-PollosKaren-Expres.png"
-                  className="px-3 py-1.5 rounded-lg bg-white border border-purple-300 text-purple-800 text-xs font-bold inline-flex items-center gap-1"
-                >
-                  <Download className="w-3.5 h-3.5" />
-                  Descargar QR
-                </a>
-              )}
-            </div>
-          </div>
-          {expresQrUrl && (
-            <img
-              src={expresQrUrl}
-              alt="QR Exprés"
-              className="w-24 h-24 rounded-xl border border-purple-200 bg-white p-1"
-            />
-          )}
-        </div>
-
-        {/* Tables QR Grid */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-          {tables.map(tbl => {
-            const url = tbl.qrToken
-              ? `${baseUrl}?menu=table&token=${encodeURIComponent(tbl.qrToken)}`
-              : '';
-            return (
-              <div
-                key={tbl.id}
-                className="p-3.5 rounded-2xl border border-gray-200 bg-gray-50 flex flex-col items-center text-center gap-2"
-              >
-                <div className="font-black text-sm text-gray-900">{tbl.name}</div>
-                {qrPreviews[tbl.id] ? (
-                  <img
-                    src={qrPreviews[tbl.id]}
-                    alt={`QR ${tbl.name}`}
-                    className="w-32 h-32 rounded-xl border border-gray-200 bg-white p-1"
-                  />
-                ) : (
-                  <div className="w-32 h-32 rounded-xl border border-dashed border-gray-300 flex items-center justify-center text-[11px] text-gray-400">
-                    Sin token QR
-                  </div>
-                )}
-
-                <div className="flex flex-wrap justify-center gap-1.5 w-full">
-                  <button
-                    type="button"
-                    onClick={() => rotateTableQRToken(tbl.id)}
-                    className="px-2.5 py-1.5 rounded-lg bg-white border border-gray-300 text-[11px] font-bold text-gray-700 inline-flex items-center gap-1 cursor-pointer hover:bg-gray-100"
-                  >
-                    <RefreshCw className="w-3 h-3" />
-                    {tbl.qrToken ? 'Rotar' : 'Generar'}
-                  </button>
-                  {url && (
-                    <button
-                      type="button"
-                      onClick={() => copyLink(url)}
-                      className="px-2.5 py-1.5 rounded-lg bg-red-600 text-white text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer"
-                    >
-                      <Copy className="w-3 h-3" />
-                      Enlace
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => toggleTableQR(tbl.id, tbl.qrEnabled === false)}
-                    className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold cursor-pointer ${
-                      tbl.qrEnabled === false
-                        ? 'bg-gray-200 text-gray-600'
-                        : 'bg-emerald-100 text-emerald-700'
-                    }`}
-                  >
-                    {tbl.qrEnabled === false ? 'Inactivo' : 'Activo'}
-                  </button>
-                </div>
-              </div>
-            );
-          })}
         </div>
       </div>
     </div>

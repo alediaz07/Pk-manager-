@@ -2,7 +2,7 @@
 
 ## 1. Caída de Internet en el Local
 - **POS y Salón**: continúe tomando comandas; el sistema detecta modo sin conexión y encola operaciones en IndexedDB v3 (`offlineQueue.ts`) asociadas al usuario y dispositivo.
-- **Escaneo de facturas IA y Menú Digital QR**: requieren conexión activa. Registre compras manualmente y atienda mesas de forma directa mientras vuelve el enlace.
+- **Escaneo de facturas IA**: requiere conexión activa. Registre compras manualmente mientras vuelve el enlace.
 - **Reconexión**: al restablecer Internet, el sistema sincroniza la cola pendiente. Si alguna operación falla repetidamente o queda marcada con `requiresReconciliation`, el administrador debe revisarla y conciliarla manualmente antes de cerrar caja.
 
 ## 2. Falla de Impresora Térmica

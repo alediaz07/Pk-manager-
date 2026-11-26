@@ -11,10 +11,9 @@
 2. Actualice la variable de entorno en el entorno de producción y reinicie el servicio.
 3. Ejecute `npm run scan:secrets` y el workflow `ci-security.yml` (Gitleaks) para confirmar que no permanezca ninguna referencia en código ni en historial Git.
 
-## 3. Abuso o Escaneo No Autorizado de QR de Mesa
-1. Ingrese a **Configuración & QR**.
-2. Pulse **Rotar Token QR** en la mesa afectada (o desactive temporalmente los pedidos QR desde la configuración general).
-3. El código QR anterior quedará rechazado automáticamente por el servidor (`403`).
+## 3. Intento de Acceso Externo o Uso de Enlaces Antiguos
+1. PK Manager es de uso exclusivamente interno: cualquier intento de acceso vía `?menu=table` o `?menu=expres` redirige automáticamente a la pantalla de inicio de sesión y los endpoints `/api/public/*` responden `HTTP 410 Gone`.
+2. Si detecta intentos repetidos de ingreso no autorizado, verifique los registros del servidor y asegúrese de que no existan invitaciones abiertas indebidas en `/user_invites`.
 
 ## 4. Discrepancia de Caja o Error de Cobro
 1. No borre registros de ventas ni de auditoría.

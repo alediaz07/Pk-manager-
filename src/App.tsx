@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useEffect } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { POSProvider } from './context/POSContext';
 import { LoginView } from './components/auth/LoginView';
@@ -16,7 +16,6 @@ import { DashboardView } from './components/dashboard/DashboardView';
 import { AuditView } from './components/audit/AuditView';
 import { KitchenDisplayView } from './components/kitchen/KitchenDisplayView';
 import { RestaurantConfigView } from './components/config/RestaurantConfigView';
-import { PublicMenuView } from './components/public/PublicMenuView';
 import { Loader2 } from 'lucide-react';
 
 function AppContent() {
@@ -79,23 +78,18 @@ function AppContent() {
 }
 
 export default function App() {
-  // Detect public digital menu routes (?menu=table&token=... or ?menu=expres) BEFORE auth gate
-  const publicRoute = useMemo(() => {
-    if (typeof window === 'undefined') return null;
+  // Strip obsolete legacy public menu / QR query params so old links land cleanly on Login
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
     const params = new URLSearchParams(window.location.search);
-    const menu = params.get('menu');
-    if (menu === 'table') {
-      return { mode: 'table' as const, token: params.get('token') || '' };
+    if (params.has('menu') || params.has('token')) {
+      params.delete('menu');
+      params.delete('token');
+      const nextSearch = params.toString();
+      const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ''}${window.location.hash}`;
+      window.history.replaceState({}, '', nextUrl);
     }
-    if (menu === 'expres') {
-      return { mode: 'expres' as const, token: undefined };
-    }
-    return null;
   }, []);
-
-  if (publicRoute) {
-    return <PublicMenuView mode={publicRoute.mode} tableToken={publicRoute.token} />;
-  }
 
   return (
     <AuthProvider>

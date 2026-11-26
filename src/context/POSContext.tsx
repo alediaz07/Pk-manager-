@@ -119,33 +119,6 @@ export interface PaymentEntryInput {
   cardAuthCode?: string;
 }
 
-export interface PendingPublicOrderItem {
-  trackingCode: string;
-  orderNumber: string;
-  serviceType: 'mesa' | 'expres';
-  tableId?: string;
-  tableName?: string;
-  items: Array<{
-    id: string;
-    productId: string;
-    name: string;
-    price: number;
-    quantity: number;
-    protein?: CasadoProtein;
-    notes?: string;
-    subtotal: number;
-  }>;
-  subtotal: number;
-  serviceCharge: number;
-  deliveryFee: number;
-  total: number;
-  observations?: string;
-  deliveryDetails?: DeliveryDetails;
-  operationalStatus: OperationalOrderStatus;
-  source: 'qr_mesa' | 'menu_expres';
-  createdAt: string;
-}
-
 const CLOSED_PLACEHOLDER_REGISTER = (dateStr: string): CashRegister => ({
   id: '',
   date: dateStr,
@@ -190,16 +163,6 @@ function buildKitchenProjection(order: RestaurantOrder, opStatus: OperationalOrd
   };
 }
 
-function generateSecureToken(): string {
-  const bytes = new Uint8Array(12);
-  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
-    crypto.getRandomValues(bytes);
-  } else {
-    for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
-  }
-  return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
-}
-
 interface POSContextType {
   // Config
   restaurantConfig: RestaurantConfig;
@@ -218,8 +181,6 @@ interface POSContextType {
   ) => Promise<void>;
   addTable: (name: string, number: number, type: 'table' | 'bar', seats: number) => Promise<void>;
   toggleTableActive: (tableId: string) => Promise<void>;
-  rotateTableQRToken: (tableId: string) => Promise<string>;
-  toggleTableQR: (tableId: string, enabled: boolean) => Promise<void>;
   importPollosKarenOfficialMenu: (options?: {
     updateExistingPrices?: boolean;
   }) => Promise<{ categoriesAdded: number; productsAdded: number; productsUpdated: number }>;
@@ -227,7 +188,6 @@ interface POSContextType {
   // Active Orders & Separated States
   orders: RestaurantOrder[];
   kitchenOrders: KitchenOrderProjection[];
-  pendingPublicOrders: PendingPublicOrderItem[];
   currentOrder: RestaurantOrder | null;
   setCurrentOrder: (order: RestaurantOrder | null) => void;
   createNewOrder: (serviceType: ServiceType, table?: RestaurantTable) => RestaurantOrder;
@@ -264,8 +224,6 @@ interface POSContextType {
     orderId: string,
     splitSelections: Array<{ lineItemId: string; quantity: number }>
   ) => Promise<{ success: boolean; newOrder?: RestaurantOrder; error?: string }>;
-  acceptPublicOrder: (trackingCode: string) => Promise<{ success: boolean; order?: RestaurantOrder; error?: string }>;
-  rejectPublicOrder: (trackingCode: string) => Promise<void>;
 
   // Kitchen Tickets
   kitchenTickets: KitchenTicket[];
@@ -396,7 +354,6 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Orders & KDS
   const [orders, setOrders] = useState<RestaurantOrder[]>([]);
   const [kitchenOrders, setKitchenOrders] = useState<KitchenOrderProjection[]>([]);
-  const [pendingPublicOrders, setPendingPublicOrders] = useState<PendingPublicOrderItem[]>([]);
   const [currentOrder, setCurrentOrder] = useState<RestaurantOrder | null>(null);
 
   // Tickets & Payments
@@ -727,14 +684,7 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
         if (tblSnap.empty) {
           INITIAL_TABLES.forEach(t => {
-            batch.set(
-              doc(db, 'tables', t.id),
-              sanitizeForFirestore({
-                ...t,
-                qrToken: t.qrToken || generateSecureToken(),
-                qrEnabled: true,
-              })
-            );
+            batch.set(doc(db, 'tables', t.id), sanitizeForFirestore(t));
           });
           hasWrites = true;
         }
@@ -749,53 +699,8 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [currentUser, isAdmin]);
 
   // ------------------------------------------------------------------------
-  // SYNC SANITIZED PUBLIC MENU & AI SNAPSHOT TO SERVER
+  // SYNC ADMIN READ-ONLY SNAPSHOT FOR AI ENDPOINTS (ZERO CACHED TOKENS)
   // ------------------------------------------------------------------------
-  useEffect(() => {
-    if (!currentUser || !isStaff || !isOnline) return;
-
-    const timer = setTimeout(async () => {
-      try {
-        const token = await currentUser.getIdToken();
-        const tableTokens: Record<string, { tableId: string; tableName: string }> = {};
-        tables.forEach(t => {
-          if (t.active && t.qrEnabled !== false && t.qrToken) {
-            tableTokens[t.qrToken] = { tableId: t.id, tableName: t.name };
-          }
-        });
-
-        await fetch('/api/public/catalog-sync', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify({
-            restaurantName: restaurantConfig.restaurantName,
-            location: restaurantConfig.location,
-            phone: restaurantConfig.phone,
-            openDays: restaurantConfig.openDays,
-            openTime: restaurantConfig.openTime,
-            closeTime: restaurantConfig.closeTime,
-            breakfastStartTime: restaurantConfig.breakfastStartTime,
-            breakfastEndTime: restaurantConfig.breakfastEndTime,
-            tableServicePercent: restaurantConfig.tableServicePercent,
-            expressDeliveryFee: restaurantConfig.expressDeliveryFee,
-            expressCoverageDescription: restaurantConfig.expressCoverageDescription,
-            categories,
-            products,
-            tableTokens,
-          }),
-        });
-      } catch {
-        // Non-blocking background sync
-      }
-    }, 1200);
-
-    return () => clearTimeout(timer);
-  }, [currentUser, isStaff, isOnline, categories, products, tables, restaurantConfig]);
-
-  // Sync admin read-only snapshot for Jarvis / AI endpoints (explicitly no cached token on server!)
   useEffect(() => {
     if (!currentUser || !isAdmin || !isOnline) return;
     const timer = setTimeout(async () => {
@@ -821,35 +726,6 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }, 2500);
     return () => clearTimeout(timer);
   }, [currentUser, isAdmin, isOnline, inventory, inventoryMovements, orders, purchases, expenses]);
-
-  // Poll pending public QR / Exprés orders for Reception authorization
-  useEffect(() => {
-    if (!currentUser || !isStaff || !isOnline) return;
-    let active = true;
-
-    const pollPublic = async () => {
-      try {
-        const token = await currentUser.getIdToken();
-        const res = await fetch('/api/public/pending-orders', {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!res.ok || !active) return;
-        const data = await res.json();
-        if (data.success && Array.isArray(data.orders)) {
-          setPendingPublicOrders(data.orders);
-        }
-      } catch {
-        // Silent retry next interval
-      }
-    };
-
-    pollPublic();
-    const interval = setInterval(pollPublic, 15000);
-    return () => {
-      active = false;
-      clearInterval(interval);
-    };
-  }, [currentUser, isStaff, isOnline]);
 
   // ------------------------------------------------------------------------
   // OFFLINE QUEUE SYNCHRONIZATION
@@ -1126,8 +1002,6 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       seats,
       active: true,
       status: 'libre',
-      qrToken: generateSecureToken(),
-      qrEnabled: true,
       updatedAt: new Date().toISOString(),
     };
     await setDoc(doc(db, 'tables', id), sanitizeForFirestore(newTable));
@@ -1143,27 +1017,6 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       updatedAt: new Date().toISOString(),
     });
     await addAuditLog('toggle_active', 'tables', tableId, `Mesa ${tbl.name} -> ${!tbl.active ? 'Activa' : 'Inactiva'}`);
-  };
-
-  const rotateTableQRToken = async (tableId: string): Promise<string> => {
-    if (!isAdmin) throw new Error('Solo el administrador puede rotar códigos QR.');
-    const newToken = generateSecureToken();
-    await updateDoc(doc(db, 'tables', tableId), {
-      qrToken: newToken,
-      qrEnabled: true,
-      updatedAt: new Date().toISOString(),
-    });
-    await addAuditLog('rotate_qr', 'tables', tableId, 'Rotación de token QR de mesa');
-    return newToken;
-  };
-
-  const toggleTableQR = async (tableId: string, enabled: boolean) => {
-    if (!isAdmin) throw new Error('Solo el administrador puede cambiar estado del QR.');
-    await updateDoc(doc(db, 'tables', tableId), {
-      qrEnabled: enabled,
-      updatedAt: new Date().toISOString(),
-    });
-    await addAuditLog('rotate_qr', 'tables', tableId, `QR de mesa ${enabled ? 'habilitado' : 'deshabilitado'}`);
   };
 
   // ------------------------------------------------------------------------
@@ -1581,16 +1434,6 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
     await batch.commit();
 
-    // Update public order status if it came from QR / Exprés
-    if (target.publicTrackingCode && currentUser) {
-      const token = await currentUser.getIdToken();
-      fetch(`/api/public/pending-orders/${target.publicTrackingCode}/status`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ operationalStatus: 'authorized', syncedToPos: true }),
-      }).catch(() => {});
-    }
-
     return { success: true };
   };
 
@@ -1624,16 +1467,6 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       })
     );
     await batch.commit();
-
-    const target = orders.find(o => o.id === orderId);
-    if (target?.publicTrackingCode && currentUser) {
-      const token = await currentUser.getIdToken();
-      fetch(`/api/public/pending-orders/${target.publicTrackingCode}/status`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ operationalStatus: nextStatus }),
-      }).catch(() => {});
-    }
   };
 
   const markOrderDelivered = async (orderId: string) => {
@@ -1670,15 +1503,6 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     await batch.commit();
-
-    if (target.publicTrackingCode && currentUser) {
-      const token = await currentUser.getIdToken();
-      fetch(`/api/public/pending-orders/${target.publicTrackingCode}/status`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ operationalStatus: 'delivered' }),
-      }).catch(() => {});
-    }
   };
 
   const updateOrderStatus = async (orderId: string, status: OrderStatus) => {
@@ -1865,100 +1689,6 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     batch.set(doc(db, 'orders', newSplitOrder.id), sanitizeForFirestore(newSplitOrder));
     await batch.commit();
     return { success: true, newOrder: newSplitOrder };
-  };
-
-  // ------------------------------------------------------------------------
-  // ACCEPT / REJECT PUBLIC QR & EXPRÉS ORDERS (Reception Gatekeeper)
-  // ------------------------------------------------------------------------
-  const acceptPublicOrder = async (
-    trackingCode: string
-  ): Promise<{ success: boolean; order?: RestaurantOrder; error?: string }> => {
-    const pub = pendingPublicOrders.find(p => p.trackingCode === trackingCode);
-    if (!pub) return { success: false, error: 'Pedido público no encontrado.' };
-
-    const nowIso = new Date().toISOString();
-    const newOrder: RestaurantOrder = {
-      id: `ord_pub_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-      orderNumber: pub.orderNumber,
-      serviceType: pub.serviceType,
-      tableId: pub.tableId,
-      tableName: pub.tableName,
-      items: pub.items.map(it => ({
-        id: it.id,
-        productId: it.productId,
-        name: it.name,
-        price: it.price,
-        quantity: it.quantity,
-        isCasado: Boolean(it.protein),
-        selectedProtein: it.protein,
-        notes: it.notes,
-        subtotal: it.subtotal,
-        deductedQuantity: 0,
-      })),
-      status: 'in_kitchen',
-      operationalStatus: 'authorized',
-      financialStatus: 'unpaid',
-      paymentStatus: 'unpaid',
-      paidAmount: 0,
-      subtotal: pub.subtotal,
-      serviceCharge: pub.serviceCharge,
-      deliveryFee: pub.deliveryFee,
-      total: pub.total,
-      observations: pub.observations,
-      deliveryDetails: pub.deliveryDetails,
-      source: pub.source,
-      publicTrackingCode: pub.trackingCode,
-      operationalDate: getCostaRicaDateString(),
-      authorizedAt: nowIso,
-      createdBy: `Recepción (${getActorName()})`,
-      createdAt: pub.createdAt || nowIso,
-      updatedAt: nowIso,
-    };
-
-    if (restaurantConfig.inventoryDeductionTrigger === 'kitchen_auth') {
-      newOrder.items = await deductInventoryDeltaForOrder(newOrder);
-      newOrder.inventoryDeducted = true;
-      newOrder.inventoryDeductedAt = nowIso;
-    }
-
-    const batch = writeBatch(db);
-    batch.set(doc(db, 'orders', newOrder.id), sanitizeForFirestore(newOrder));
-    batch.set(
-      doc(db, 'kitchen_orders', newOrder.id),
-      sanitizeForFirestore(buildKitchenProjection(newOrder, 'authorized'))
-    );
-    if (newOrder.tableId) {
-      batch.update(doc(db, 'tables', newOrder.tableId), {
-        status: 'activa',
-        currentOrderId: newOrder.id,
-        updatedAt: nowIso,
-      });
-    }
-    await batch.commit();
-
-    if (currentUser) {
-      const token = await currentUser.getIdToken();
-      await fetch(`/api/public/pending-orders/${trackingCode}/status`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ operationalStatus: 'authorized', syncedToPos: true }),
-      }).catch(() => {});
-    }
-
-    setPendingPublicOrders(prev => prev.filter(p => p.trackingCode !== trackingCode));
-    return { success: true, order: newOrder };
-  };
-
-  const rejectPublicOrder = async (trackingCode: string) => {
-    if (currentUser) {
-      const token = await currentUser.getIdToken();
-      await fetch(`/api/public/pending-orders/${trackingCode}/status`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ operationalStatus: 'cancelled', syncedToPos: true }),
-      }).catch(() => {});
-    }
-    setPendingPublicOrders(prev => prev.filter(p => p.trackingCode !== trackingCode));
   };
 
   // ------------------------------------------------------------------------
@@ -3306,12 +3036,9 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateTableStatus,
         addTable,
         toggleTableActive,
-        rotateTableQRToken,
-        toggleTableQR,
         importPollosKarenOfficialMenu,
         orders,
         kitchenOrders,
-        pendingPublicOrders,
         currentOrder,
         setCurrentOrder,
         createNewOrder,
@@ -3330,8 +3057,6 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         transferTableOrder,
         mergeTableOrders,
         splitOrderItems,
-        acceptPublicOrder,
-        rejectPublicOrder,
         kitchenTickets,
         printOrderTicket,
         activeTicketToPrint,

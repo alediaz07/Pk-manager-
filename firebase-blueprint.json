@@ -73,7 +73,7 @@
     },
     "Table": {
       "title": "Table",
-      "description": "Dining tables 1-7 and Barra with revocable QR token",
+      "description": "Dining tables 1-7 and Barra for internal POS service",
       "type": "object",
       "properties": {
         "name": { "type": "string", "maxLength": 50 },
@@ -82,8 +82,6 @@
         "active": { "type": "boolean" },
         "status": { "type": "string", "enum": ["libre", "activa", "pendiente_pago"] },
         "currentOrderId": { "type": "string", "maxLength": 64 },
-        "qrToken": { "type": "string", "maxLength": 80 },
-        "qrEnabled": { "type": "boolean" },
         "updatedAt": { "type": "string" }
       },
       "required": ["name", "number", "type", "active", "status"]
@@ -111,7 +109,7 @@
         "total": { "type": "number" },
         "observations": { "type": "string", "maxLength": 500 },
         "operationalDate": { "type": "string", "maxLength": 20 },
-        "source": { "type": "string", "enum": ["pos", "qr_mesa", "menu_expres"] },
+        "source": { "type": "string", "enum": ["pos", "qr_mesa", "menu_expres"], "description": "New orders strictly use 'pos'; legacy values preserved for historical records." },
         "createdBy": { "type": "string", "maxLength": 128 },
         "createdAt": { "type": "string" },
         "updatedAt": { "type": "string" },

@@ -447,7 +447,7 @@ async function main() {
     assert.equal(patch.status, 'closed');
   });
 
-  // 8. Live Express HTTP concurrency burst on /api/public/order verifying rate limiting (max 12 / 5 min)
+  // 8. Live Express HTTP concurrency burst: retired /api/public/* strictly returns 410 & active /api/ai/* enforces rate limiting
   const { app } = await import('../server');
   const server = http.createServer(app);
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -456,7 +456,7 @@ async function main() {
   const baseUrl = `http://127.0.0.1:${port}`;
 
   try {
-    await runTest('Express HTTP concurrencia: ráfaga de 16 pedidos públicos simultáneos activa rate-limit (429)', async () => {
+    await runTest('Express HTTP concurrencia: ráfaga de 16 peticiones a /api/public/order retorna 100% HTTP 410 Gone', async () => {
       const burst = Array.from({ length: 16 }, (_, idx) =>
         fetch(`${baseUrl}/api/public/order`, {
           method: 'POST',
@@ -473,11 +473,11 @@ async function main() {
       );
 
       const statuses = await Promise.all(burst);
-      const rateLimited = statuses.filter(s => s === 429);
-      const nonRateLimited = statuses.filter(s => s !== 429);
-
-      assert.equal(nonRateLimited.length, 12, `Exactamente 12 solicitudes deben pasar el rate limiter antes del bloqueo (recibidas: ${nonRateLimited.length})`);
-      assert.equal(rateLimited.length, 4, `Las 4 solicitudes excedentes deben recibir HTTP 429 (recibidas: ${rateLimited.length})`);
+      assert.equal(
+        statuses.every(s => s === 410),
+        true,
+        `Todas las peticiones a /api/public/order deben retornar HTTP 410 Gone (recibidos: ${statuses.join(',')})`
+      );
     });
   } finally {
     await new Promise<void>(resolve => server.close(() => resolve()));

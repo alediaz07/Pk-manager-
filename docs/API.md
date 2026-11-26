@@ -24,10 +24,5 @@ Todos los endpoints bajo `/api/*` son servidos por Express y excluidos del cach�
 - `GET /api/ai/financial-overview`: panorama financiero operativo.
 - `GET /api/ai/openapi.json`: especificación OpenAPI 3.1 para integración controlada.
 
-## 4. Menú Digital QR de Mesa y Pedidos Exprés
-- `POST /api/public/catalog-sync` (Auth: Staff) — sincroniza catálogo público sin costos ni PII y tokens QR activos de mesas.
-- `GET /api/public/menu` (Pública) — devuelve catálogo público, horarios y tarifas vigentes (nunca expone costos de inventario/recetas ni PII). Responde `503` si el catálogo aún no fue sincronizado.
-- `POST /api/public/order` (Pública, con rate limit) — valida precios en servidor desde catálogo oficial, exige `tableToken` válido para QR de mesa y guarda el pedido como `pending_auth` (nunca entra directo a cocina).
-- `GET /api/public/order-status/:trackingCode` (Pública) — estado operativo del pedido para seguimiento del cliente.
-- `GET /api/public/pending-orders` (Auth: Staff) — lista de pedidos pendientes de aprobación en POS.
-- `POST /api/public/pending-orders/:trackingCode/status` (Auth: Staff) — marca pedido como aceptado/rechazado tras revisión humana.
+## 4. Rutas Públicas Retiradas (`/api/public/*`)
+- **Deshabilitado permanentemente (`HTTP 410 Gone`):** Todos los endpoints históricos bajo `/api/public/*` (`/api/public/catalog-sync`, `/api/public/menu`, `/api/public/order`, `/api/public/order-status/:trackingCode`, `/api/public/pending-orders`) fueron eliminados al convertirse PK Manager en una aplicación de uso exclusivamente interno. Cualquier solicitud a `/api/public/*` responde `410 Gone` sin devolver datos ni permitir el registro de pedidos.
