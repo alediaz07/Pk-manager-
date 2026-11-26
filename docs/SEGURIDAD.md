@@ -5,7 +5,7 @@
 - **Cero autorregistro público**: cualquier cuenta autenticada sin documento activo en `/users/{uid}` o invitación previa es cerrada inmediatamente (`signOut`) sin conceder acceso.
 - **Revocación inmediata de sesión**: `AuthContext` mantiene un listener `onSnapshot` sobre `/users/{uid}`; desactivar un usuario cierra su sesión activa al instante.
 - **Protección contra fuerza bruta en cliente**: bloqueo temporal progresivo en `LoginView` tras 5 intentos fallidos consecutivos.
-- **Aislamiento estricto por rol (RBAC)**: `admin`, `colaborador` y `cocina` aplicados tanto en la interfaz como en `firestore.rules` y en `server.ts`.
+- **Aislamiento estricto por rol (RBAC)**: `admin` y `colaborador` aplicados tanto en la interfaz como en `firestore.rules` y en `server.ts`.
 
 ## 2. Hardening del Servidor Express (`server.ts`)
 - Eliminación total de `cachedAdminToken` y de cualquier credencial estática de respaldo.
@@ -22,7 +22,7 @@
 
 ## 3. Reglas de Firestore (`firestore.rules`)
 - Política **deny-by-default** (`match /{document=**} { allow read, write: if false; }`).
-- **Cocina (`isCocina()`)**: acceso exclusivo de lectura y actualización controlada (`operationalStatus`, `startedAt`, `readyAt`, `updatedAt`) únicamente en `/kitchen_orders` y lectura de `/restaurant_config/main`. Sin acceso a `/orders`, `/payments`, `/cash_registers`, `/recipes`, `/inventory_items`, `/purchases`, `/operating_expenses` ni `/audit_logs`.
+- **Rol histórico `cocina`**: bloqueado en autenticación y en las reglas de operación; no se crean nuevas cuentas ni invitaciones con ese rol. La colección histórica `/kitchen_orders` es de solo lectura administrativa.
 - **Colaborador (`isColaborador()`)**: operación POS, mesas, cobros y cierre de caja; lectura de `/recipe_formulas` (sin costos) para descuento delta de inventario; sin acceso de lectura a `/recipes` (costos/márgenes), `/purchases`, `/operating_expenses` ni `/audit_logs`.
 - **Auditoría inmutable**: `/audit_logs` permite únicamente `create` vinculado al `request.auth.uid`, correo autenticado y documento real existente; `update` y `delete` están bloqueados (`if false`).
 - **Pedidos exclusivamente internos**: `/orders` exige personal autenticado (`isStaff()`), `source == 'pos'` y rechaza `publicTrackingCode` en pedidos nuevos, preservando compatibilidad de lectura con registros históricos.

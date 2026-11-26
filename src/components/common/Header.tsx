@@ -138,7 +138,7 @@ export const Header: React.FC = () => {
             >
               {isAdmin ? <Shield className="w-3.5 h-3.5" /> : <UserCheck className="w-3.5 h-3.5" />}
               <span className="capitalize">
-                {role === 'admin' ? 'Administrador' : role === 'cocina' ? 'Cocina' : 'Colaborador'}
+                {role === 'admin' ? 'Administrador' : 'Colaborador'}
               </span>
               <ChevronDown className="w-3 h-3 opacity-70" />
             </button>
@@ -154,7 +154,7 @@ export const Header: React.FC = () => {
                         isAdmin ? 'bg-amber-100 text-amber-900' : 'bg-blue-100 text-blue-900'
                       }`}
                     >
-                      Rol: {role === 'admin' ? 'Administrador' : role === 'cocina' ? 'Cocina' : 'Colaborador'}
+                      Rol: {role === 'admin' ? 'Administrador' : 'Colaborador'}
                     </span>
                   </div>
                 </div>

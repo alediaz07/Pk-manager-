@@ -1,5 +1,7 @@
 # Plan de Implementación — Pollos Karen Manager
 
+> Alcance actualizado: las fases originales describen el historial del proyecto. KDS y rol de cocina fueron retirados; se conserva la impresión térmica y se trabaja con dos roles activos.
+
 Este plan organiza el endurecimiento, corrección operativa y preparación para producción en **10 fases secuenciales (Fase 0 a Fase 9)**, conservando los datos existentes y la identidad visual de Pollos Karen.
 
 | Fase | Nombre | Objetivos Clave |

@@ -10,7 +10,7 @@
   - **Ventana (0%)**: sin recargo de servicio.
   - **Exprés**: registro manual en el POS (por ejemplo, pedidos recibidos por teléfono o WhatsApp); sin 10% de servicio; aplica la tarifa de envío configurada y permite registrar nombre, teléfono y dirección en La Uruca.
 - Para los **Casados**, seleccione obligatoriamente la proteína (`Pollo`, `Carne`, `Chuleta` o `Pescado`) y agregue observaciones si el cliente solicita cambios.
-- Pulse **Guardar / Autorizar** o **Imprimir Cocina** para enviar la comanda a la pantalla KDS y a la impresora térmica de cocina.
+- Pulse **Guardar e imprimir** para registrar la orden y solicitar su impresión térmica. Entregue la comanda física al personal de cocina. **Guardar comanda** registra la orden sin imprimir; use la reimpresión desde comandas activas si necesita una copia.
 
 ## 3. Gestión de Mesas, Precuenta y Cobro
 - Puede **Transferir** una comanda a otra mesa libre desde el encabezado del carrito.

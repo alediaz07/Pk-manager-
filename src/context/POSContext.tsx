@@ -39,7 +39,6 @@ import {
   Recipe,
   PaymentRecord,
   DeliveryDetails,
-  KitchenOrderProjection,
   RestaurantConfig,
   Supplier,
   DenominationCount,
@@ -137,32 +136,6 @@ const CLOSED_PLACEHOLDER_REGISTER = (dateStr: string): CashRegister => ({
   expectedCash: 0,
 });
 
-function buildKitchenProjection(order: RestaurantOrder, opStatus: OperationalOrderStatus): KitchenOrderProjection {
-  const nowIso = new Date().toISOString();
-  return {
-    id: order.id,
-    orderId: order.id,
-    orderNumber: order.orderNumber,
-    serviceType: order.serviceType,
-    tableName: order.tableName,
-    operationalStatus: opStatus,
-    items: order.items.map(it => ({
-      id: it.id,
-      name: it.name,
-      quantity: it.quantity,
-      selectedProtein: it.selectedProtein,
-      notes: it.notes,
-    })),
-    observations: order.observations,
-    createdAt: order.createdAt || nowIso,
-    operationalDate: order.operationalDate || getCostaRicaDateString(),
-    authorizedAt: order.authorizedAt || order.createdAt || nowIso,
-    startedAt: order.startedAt,
-    readyAt: order.readyAt,
-    updatedAt: nowIso,
-  };
-}
-
 interface POSContextType {
   // Config
   restaurantConfig: RestaurantConfig;
@@ -187,7 +160,6 @@ interface POSContextType {
 
   // Active Orders & Separated States
   orders: RestaurantOrder[];
-  kitchenOrders: KitchenOrderProjection[];
   currentOrder: RestaurantOrder | null;
   setCurrentOrder: (order: RestaurantOrder | null) => void;
   createNewOrder: (serviceType: ServiceType, table?: RestaurantTable) => RestaurantOrder;
@@ -333,7 +305,7 @@ interface POSContextType {
 const POSContext = createContext<POSContextType | undefined>(undefined);
 
 export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { currentUser, appUser, role, isAdmin, isCocina } = useAuth();
+  const { currentUser, appUser, role, isAdmin } = useAuth();
 
   const [isOnline, setIsOnline] = useState<boolean>(
     typeof navigator !== 'undefined' ? navigator.onLine : true
@@ -351,9 +323,8 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [products, setProducts] = useState<ProductItem[]>(INITIAL_PRODUCTS);
   const [selectedTable, setSelectedTable] = useState<RestaurantTable | null>(null);
 
-  // Orders & KDS
+  // Orders
   const [orders, setOrders] = useState<RestaurantOrder[]>([]);
-  const [kitchenOrders, setKitchenOrders] = useState<KitchenOrderProjection[]>([]);
   const [currentOrder, setCurrentOrder] = useState<RestaurantOrder | null>(null);
 
   // Tickets & Payments
@@ -407,7 +378,7 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       reason: string,
       details?: string
     ) => {
-      if (!currentUser || isCocina) return;
+      if (!currentUser || !isStaff) return;
       const logId = `aud_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
       const entry: AuditLog = {
         id: logId,
@@ -427,14 +398,14 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         console.warn('No se pudo registrar auditoría:', err);
       }
     },
-    [currentUser, isCocina, getActorName]
+    [currentUser, isStaff, getActorName]
   );
 
   // ------------------------------------------------------------------------
   // ROLE-SCOPED & BOUNDED FIRESTORE SUBSCRIPTIONS
   // ------------------------------------------------------------------------
   useEffect(() => {
-    if (!currentUser || !role) return;
+    if (!currentUser || !isStaff) return;
 
     const unsubs: Array<() => void> = [];
 
@@ -453,23 +424,6 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         err => console.warn('Config listener:', err)
       )
     );
-
-    // 2. Sanitized Kitchen Orders (all active roles — primary feed for Cocina KDS!)
-    unsubs.push(
-      onSnapshot(
-        query(collection(db, 'kitchen_orders'), orderBy('authorizedAt', 'desc'), limit(80)),
-        snap => {
-          const list = snap.docs.map(d => d.data() as KitchenOrderProjection);
-          setKitchenOrders(list);
-        },
-        err => console.warn('Kitchen orders listener:', err)
-      )
-    );
-
-    // STRICT ISOLATION: Cocina role stops here (zero reads to orders, cash, costs, or admin collections!)
-    if (role === 'cocina') {
-      return () => unsubs.forEach(u => u());
-    }
 
     // 3. Staff & Admin Operational Listeners (all bounded)
     unsubs.push(
@@ -732,7 +686,7 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // ------------------------------------------------------------------------
   const syncOfflineQueue = useCallback(async () => {
     if (typeof navigator !== 'undefined' && !navigator.onLine) return;
-    if (!currentUser || isCocina) return;
+    if (!currentUser || !isStaff) return;
 
     const [queuedOrders, queuedMutations] = await Promise.all([
       getOfflineOrders(),
@@ -874,7 +828,7 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const remaining = await getOfflinePendingCount();
     setPendingOfflineCount(remaining);
-  }, [currentUser, isCocina, activeCashRegister?.id, getActorName]);
+  }, [currentUser, isStaff, activeCashRegister?.id, getActorName]);
 
   useEffect(() => {
     const handleOnline = () => {
@@ -1291,7 +1245,7 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // ------------------------------------------------------------------------
-  // SAVE ORDER & AUTHORIZE TO KITCHEN (KDS)
+  // SAVE ORDER FOR PRINTED COMANDA
   // ------------------------------------------------------------------------
   const saveActiveOrder = async (options?: {
     authorizeToKitchen?: boolean;
@@ -1366,12 +1320,6 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         merge: true,
       });
 
-      if (nextOpStatus !== 'pending_auth' && nextOpStatus !== 'cancelled') {
-        const projection = buildKitchenProjection(orderToSave, nextOpStatus);
-        batch.set(doc(db, 'kitchen_orders', orderToSave.id), sanitizeForFirestore(projection), {
-          merge: true,
-        });
-      }
 
       if (orderToSave.serviceType === 'mesa' && orderToSave.tableId) {
         batch.update(doc(db, 'tables', orderToSave.tableId), {
@@ -1427,11 +1375,6 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const batch = writeBatch(db);
     batch.set(doc(db, 'orders', orderId), sanitizeForFirestore(updatedOrder), { merge: true });
-    batch.set(
-      doc(db, 'kitchen_orders', orderId),
-      sanitizeForFirestore(buildKitchenProjection(updatedOrder, 'authorized')),
-      { merge: true }
-    );
     await batch.commit();
 
     return { success: true };
@@ -1442,21 +1385,7 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     nextStatus: 'in_preparation' | 'ready'
   ) => {
     const nowIso = new Date().toISOString();
-    const kitchenPatch: Record<string, any> = {
-      operationalStatus: nextStatus,
-      updatedAt: nowIso,
-    };
-    if (nextStatus === 'in_preparation') kitchenPatch.startedAt = nowIso;
-    if (nextStatus === 'ready') kitchenPatch.readyAt = nowIso;
-
-    // Cocina ONLY writes to /kitchen_orders/{orderId} (strictly isolated from /orders)
-    if (isCocina) {
-      await updateDoc(doc(db, 'kitchen_orders', orderId), sanitizeForFirestore(kitchenPatch));
-      return;
-    }
-
     const batch = writeBatch(db);
-    batch.update(doc(db, 'kitchen_orders', orderId), sanitizeForFirestore(kitchenPatch));
     batch.update(
       doc(db, 'orders', orderId),
       sanitizeForFirestore({
@@ -1484,14 +1413,6 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         deliveredAt: nowIso,
         updatedAt: nowIso,
       })
-    );
-    batch.set(
-      doc(db, 'kitchen_orders', orderId),
-      sanitizeForFirestore({
-        operationalStatus: 'delivered',
-        updatedAt: nowIso,
-      }),
-      { merge: true }
     );
 
     if (target.serviceType === 'mesa' && target.tableId && finStatus === 'paid') {
@@ -1557,11 +1478,6 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       tableName: targetTable.name,
       updatedAt: nowIso,
     });
-    batch.set(
-      doc(db, 'kitchen_orders', order.id),
-      { tableName: targetTable.name, updatedAt: nowIso },
-      { merge: true }
-    );
     await batch.commit();
     return { success: true };
   };
@@ -1591,11 +1507,6 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const batch = writeBatch(db);
     batch.set(doc(db, 'orders', target.id), sanitizeForFirestore(recalculated), { merge: true });
-    batch.set(
-      doc(db, 'kitchen_orders', target.id),
-      sanitizeForFirestore(buildKitchenProjection(recalculated, resolveOperationalStatus(recalculated))),
-      { merge: true }
-    );
     batch.update(doc(db, 'orders', source.id), {
       status: 'cancelled',
       operationalStatus: 'cancelled',
@@ -1604,11 +1515,6 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       cancelledBy: getActorName(),
       updatedAt: nowIso,
     });
-    batch.set(
-      doc(db, 'kitchen_orders', source.id),
-      { operationalStatus: 'cancelled', updatedAt: nowIso },
-      { merge: true }
-    );
     if (source.tableId) {
       batch.update(doc(db, 'tables', source.tableId), {
         status: 'libre',
@@ -1707,7 +1613,7 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const nowIso = new Date().toISOString();
     const wasPaid = resolveFinancialStatus(order) === 'paid' || (order.paidAmount || 0) > 0;
 
-    // 1. Update order & kitchen projection & free table
+    // 1. Update order & free table
     const batch = writeBatch(db);
     batch.update(
       doc(db, 'orders', orderId),
@@ -1722,11 +1628,6 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         cancelledBy: getActorName(),
         updatedAt: nowIso,
       })
-    );
-    batch.set(
-      doc(db, 'kitchen_orders', orderId),
-      { operationalStatus: 'cancelled', updatedAt: nowIso },
-      { merge: true }
     );
     if (order.tableId) {
       batch.update(doc(db, 'tables', order.tableId), {
@@ -3038,7 +2939,6 @@ export const POSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         toggleTableActive,
         importPollosKarenOfficialMenu,
         orders,
-        kitchenOrders,
         currentOrder,
         setCurrentOrder,
         createNewOrder,

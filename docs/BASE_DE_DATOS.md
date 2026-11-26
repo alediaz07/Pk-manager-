@@ -6,14 +6,14 @@ Todas las colecciones residen en Cloud Firestore bajo el proyecto configurado (`
 
 | Colección | Propósito | Acceso Lectura | Acceso Escritura |
 | --- | --- | --- | --- |
-| `/users/{uid}` | Perfil, rol (`admin`, `colaborador`, `cocina`) y estado `active` | Propio usuario o Admin | Solo Admin |
+| `/users/{uid}` | Perfil, rol activo (`admin`, `colaborador`); `cocina` histórico bloqueado y estado `active` | Propio usuario o Admin | Solo Admin |
 | `/admins/{uid}` | Índice auxiliar de administradores activos | Admin | Solo Admin |
 | `/user_invites/{normalizedEmail}` | Preautorización de cuentas Google/correo por rol | Admin o dueño autenticado | Solo Admin |
 | `/categories/{id}` | Categorías del menú (con horarios opcionales) | Staff (`admin`, `colaborador`) | Solo Admin |
 | `/products/{id}` | Productos, precios CRC, bandera `isCasado` y disponibilidad | Staff | Solo Admin |
 | `/tables/{id}` | Mesas/barra y estado (`libre`, `activa`, `pendiente_pago`). Campos históricos legacy preservados sin generación activa. | Staff | Admin (Colaborador solo estado/orden) |
-| `/orders/{id}` | Comandas internas (`source: 'pos'` para pedidos nuevos; lectura compatible con registros históricos) con `operationalStatus` y `financialStatus` separados | Staff (Cocina: **DENEGADO**) | Staff (Anulación: solo Admin) |
-| `/kitchen_orders/{id}` | Proyección sanitizada para KDS **sin precios ni datos financieros** | Todos los usuarios activos (incl. Cocina) | Staff crea/actualiza; Cocina solo `in_preparation` / `ready` |
+| `/orders/{id}` | Comandas internas (`source: 'pos'` para pedidos nuevos; lectura compatible con registros históricos) con `operationalStatus` y `financialStatus` separados | Staff | Staff (Anulación: solo Admin) |
+| `/kitchen_orders/{id}` | Proyección histórica del módulo retirado | Solo Admin | Denegado |
 | `/kitchen_tickets/{id}` | Historial de impresiones y reimpresiones (`*** COPIA ***`) | Staff | Staff |
 | `/payments/{id}` | Pagos persistentes (efectivo, SINPE con ref., tarjeta, parciales/mixtos) | Staff | Staff crea (idempotente); reembolsos solo Admin |
 | `/cash_registers/{id}` | Jornadas de caja (apertura explícita, arqueo, denominaciones, cierre) | Staff | Staff abre/cierra; reapertura solo Admin |
@@ -30,5 +30,5 @@ Todas las colecciones residen en Cloud Firestore bajo el proyecto configurado (`
 | `/audit_logs/{id}` | Bitácora inmutable (`update, delete: if false`) | Solo Admin | Staff/Admin al crear evento real |
 
 ## Consultas Acotadas y Rendimiento
-- Los listeners en `POSContext` están filtrados por rol (p. ej. `cocina` únicamente suscribe `/kitchen_orders` y `/restaurant_config/main`) y aplican `limit(...)` para evitar descargas masivas innecesarias.
+- Los listeners en `POSContext` están filtrados por los dos roles activos y aplican `limit(...)`; ya no existe una suscripción a `/kitchen_orders`.
 - Esquema sincronizado en `/firebase-blueprint.json` y `/security_spec.md`.

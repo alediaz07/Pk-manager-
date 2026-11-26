@@ -1,15 +1,15 @@
 # Security Specification — Pollos Karen Manager
 
-## 1. Data Invariants & Role Separation (3 Roles)
+## 1. Data Invariants & Role Separation (2 Active Roles)
 
 1. **Zero Public Self-Registration**:
    - No arbitrary Google or email account may create `/users/{uid}`.
    - Only an active Administrator may create staff accounts or pre-authorized `/user_invites/{inviteId}` entries.
    - Deactivated accounts (`active == false`) are immediately rejected by both Firestore Rules (`isActiveUser()`) and real-time client profile revocation.
-2. **Three Strict Roles**:
+2. **Two Active Roles**:
    - `admin`: Full access to finances, inventory, recipes/costs, purchases, suppliers, operating expenses, audit logs, backups, restaurant configuration, and user administration.
-   - `colaborador`: Operational POS & cashier access (active orders, table status, confirmed payments, open register sales counters, kitchen order sync, public order authorization, non-fiscal receipt printing). **Zero read access** to `purchases`, `operating_expenses`, `suppliers`, `recipes` (contains costs), `inventory_items` (contains unit costs), `audit_logs`, or `admins` list.
-   - `cocina`: Isolated Kitchen Display System (KDS) role. **ONLY** reads sanitized `/kitchen_orders/{orderId}` (strictly zero prices, zero totals, zero payment fields) and updates preparation transitions (`in_preparation`, `ready`). **Zero access** to `/orders`, `/payments`, `/cash_registers`, `/cash_movements`, `/purchases`, `/operating_expenses`, `/recipes`, `/inventory_items`, or `/audit_logs`.
+   - `colaborador`: Operational POS & cashier access (active orders, table status, confirmed payments, open register sales counters, printed ticket issuance, internal order management, non-fiscal receipt printing). **Zero read access** to `purchases`, `operating_expenses`, `suppliers`, `recipes` (contains costs), `inventory_items` (contains unit costs), `audit_logs`, or `admins` list.
+   - Historical `cocina` profiles are blocked from operational access and cannot be created or assigned. Historical `/kitchen_orders` is admin-read-only; POS no longer reads or writes it.
 3. **Separated Operational & Financial Lifecycles**:
    - `operationalStatus`: `pending_auth` → `authorized` → `in_preparation` → `ready` → `delivered` (or `cancelled`).
    - `financialStatus`: `unpaid` → `partially_paid` → `paid` → `refunded`.
@@ -20,9 +20,9 @@
 5. **Immutable Audit Logs & Payment Records**:
    - `/audit_logs/{logId}` is strictly append-only (`update: false, delete: false`), bound to `request.auth.uid`, and cross-checked with `exists()` / `existsAfter()` against real documents.
    - `/payments/{paymentId}` is append-only for staff; only admins may record refund status updates.
-6. **Public Digital Menu & Order Isolation**:
-   - `/public_catalog/menu` exposes strictly sanitized menu data (zero costs, zero recipes, zero internal data).
-   - Public orders are price-verified server-side in `/api/public/order` and enter as `operationalStatus: 'pending_auth'`.
+6. **Internal POS Only**:
+   - `/api/public/*` returns HTTP 410. Customer-facing menu, QR ordering, external tracking and KDS are retired.
+   - Staff manage internal orders and print thermal tickets; no new digital kitchen projections are created.
 
 ---
 

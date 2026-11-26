@@ -1,3 +1,4 @@
+// 'cocina' is retained only for historical profiles; authentication and new assignments reject it.
 export type UserRole = 'admin' | 'colaborador' | 'cocina';
 
 export interface AppUser {
@@ -174,37 +175,6 @@ export interface RestaurantOrder {
   /** @deprecated Legacy read-only compatibility field for historical orders */
   publicTrackingCode?: string;
   splitFromOrderId?: string;
-}
-
-// Sanitized Kitchen Display System (KDS) projection — STRICTLY ZERO PRICES / FINANCIALS
-export interface KitchenOrderItem {
-  id: string;
-  name: string;
-  quantity: number;
-  selectedProtein?: CasadoProtein;
-  notes?: string;
-  isAddedDelta?: boolean;
-}
-
-export interface KitchenOrderProjection {
-  id: string;
-  orderId: string;
-  orderNumber: string;
-  serviceType: ServiceType;
-  tableName?: string;
-  source?: OrderSource;
-  operationalStatus: OperationalOrderStatus;
-  items: KitchenOrderItem[];
-  observations?: string;
-  customerName?: string; // Only first name / label for pickup/expres identification, never financial data
-  priority?: 'normal' | 'alta';
-  createdAt: string;
-  authorizedAt?: string;
-  startedAt?: string;
-  readyAt?: string;
-  dispatchedAt?: string;
-  updatedAt: string;
-  operationalDate: string;
 }
 
 // Persistent Payment Record (Collection: /payments/{paymentId})

@@ -12,14 +12,12 @@ import {
   TrendingUp,
   FileSpreadsheet,
   Lock,
-  Flame,
   Settings,
 } from 'lucide-react';
 
 export type NavTab =
   | 'pos'
   | 'tables'
-  | 'kitchen'
   | 'cash'
   | 'inventory'
   | 'purchases'
@@ -36,11 +34,7 @@ interface SidebarProps {
 
 export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => {
   const { isAdmin } = useAuth();
-  const { kitchenOrders, hasOpenCashRegister } = usePOS();
-
-  const activeKitchenCount = kitchenOrders.filter(
-    k => k.operationalStatus === 'authorized' || k.operationalStatus === 'in_preparation'
-  ).length;
+  const { hasOpenCashRegister } = usePOS();
 
   const standardNavItems: {
     id: NavTab;
@@ -55,13 +49,6 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
       icon: Store,
     },
     { id: 'tables', label: 'Mesas & Barra', icon: LayoutGrid },
-    {
-      id: 'kitchen',
-      label: 'Cocina (KDS)',
-      icon: Flame,
-      badge: activeKitchenCount > 0 ? activeKitchenCount : undefined,
-      badgeColor: 'bg-amber-500 text-gray-950',
-    },
     {
       id: 'cash',
       label: 'Caja General',

@@ -6,11 +6,8 @@
 - **Reconexión**: al restablecer Internet, el sistema sincroniza la cola pendiente. Si alguna operación falla repetidamente o queda marcada con `requiresReconciliation`, el administrador debe revisarla y conciliarla manualmente antes de cerrar caja.
 
 ## 2. Falla de Impresora Térmica
-- Use la **Pantalla de Cocina (KDS)** como canal primario en cocina; las comandas aparecen en tiempo real sin depender de papel.
-- Si falla la impresora de caja, entregue el detalle desde pantalla o reimprima desde el historial una vez restablecido el equipo.
+- Registre la orden en POS y transcriba manualmente la comanda en papel, con número de pedido, cantidades y observaciones. Entregue una sola copia a cocina y evite duplicar la preparación.
+- Si dispone de otra impresora compatible, selecciónela en el navegador. Reimprima solo cuando haga falta y marque las copias para evitar preparación duplicada.
 
-## 3. Caída de Tablet KDS en Cocina
-- Utilice la impresión térmica de comandas desde el POS (`Imprimir Cocina`) o abra temporalmente la vista KDS desde un celular o laptop secundaria con una cuenta `cocina`.
-
-## 4. Cierre de Caja de Día Anterior Olvidado
+## 3. Cierre de Caja de Día Anterior Olvidado
 - Al iniciar la mañana siguiente, el módulo **Caja** detectará automáticamente la jornada pendiente de cierre. Cierre primero la caja atrasada con el conteo físico real y luego abra la nueva caja del día actual.

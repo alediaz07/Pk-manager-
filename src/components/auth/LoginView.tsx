@@ -3,7 +3,6 @@ import { useAuth } from '../../context/AuthContext';
 import {
   Shield,
   UserCheck,
-  ChefHat,
   Lock,
   Mail,
   KeyRound,
@@ -305,15 +304,6 @@ export const LoginView: React.FC = () => {
                 </div>
               </div>
 
-              <div className="flex items-start gap-2 pt-1.5 border-t border-gray-200">
-                <ChefHat className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-                <div>
-                  <span className="font-bold text-gray-900">Cocina (KDS):</span>
-                  <p className="text-[11px] text-gray-600">
-                    Pantalla exclusiva de comandas autorizadas y estado de preparación. Sin acceso a precios, cobros ni caja.
-                  </p>
-                </div>
-              </div>
             </div>
           )}
         </div>

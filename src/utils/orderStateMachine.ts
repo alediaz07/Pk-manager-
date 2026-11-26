@@ -138,7 +138,7 @@ export function computeFinancialStatus(
 const VALID_OPERATIONAL_TRANSITIONS: Record<OperationalOrderStatus, OperationalOrderStatus[]> = {
   draft: ['pending_auth', 'authorized', 'in_preparation', 'cancelled'],
   pending_auth: ['authorized', 'in_preparation', 'cancelled'],
-  authorized: ['in_preparation', 'ready', 'cancelled'],
+  authorized: ['in_preparation', 'ready', 'delivered', 'cancelled'],
   in_preparation: ['ready', 'delivered', 'cancelled'],
   ready: ['dispatched', 'delivered', 'cancelled'],
   dispatched: ['delivered', 'cancelled'],
@@ -151,20 +151,13 @@ export function canTransitionOperationalStatus(
   to: OperationalOrderStatus,
   role: UserRole
 ): { allowed: boolean; reason?: string } {
+  if (role === 'cocina') return { allowed: false, reason: 'El rol de cocina fue retirado.' };
   if (from === to) return { allowed: true };
   if (from === 'cancelled') {
     return { allowed: false, reason: 'Una comanda anulada no puede cambiar de estado.' };
   }
   if (to === 'cancelled' && role !== 'admin') {
     return { allowed: false, reason: 'Solo un Administrador puede anular comandas.' };
-  }
-  if (role === 'cocina') {
-    const kitchenAllowed =
-      (from === 'authorized' && (to === 'in_preparation' || to === 'ready')) ||
-      (from === 'in_preparation' && to === 'ready');
-    return kitchenAllowed
-      ? { allowed: true }
-      : { allowed: false, reason: 'Cocina solo puede avanzar comandas autorizadas a En Preparación o Lista.' };
   }
   if (!VALID_OPERATIONAL_TRANSITIONS[from]?.includes(to)) {
     return {
