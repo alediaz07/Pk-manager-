@@ -196,29 +196,22 @@ async function main() {
       assert.ok(res.status === 401 || res.status === 503, `Esperado 401 o 503, recibido ${res.status}`);
     });
 
-    await runTest('GET /api/public/menu responde fail-closed (503) o catálogo sin costos ni PII', async () => {
-      const res = await fetch(`${baseUrl}/api/public/menu`);
-      assert.ok(res.status === 200 || res.status === 503, `Esperado 200 o 503, recibido ${res.status}`);
-      const body = await res.json();
-      const serialized = JSON.stringify(body);
-      assert.equal(serialized.includes('averageCost'), false, 'Menú público no debe exponer costos de inventario');
-      assert.equal(serialized.includes('calculatedCost'), false, 'Menú público no debe exponer costos de recetas');
-    });
-
-    await runTest('POST /api/public/order rechaza mesa QR sin catálogo o con token inválido (400/403/503)', async () => {
-      const res = await fetch(`${baseUrl}/api/public/order`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          serviceType: 'mesa',
-          tableToken: 'token-falso-inexistente',
-          items: [{ productId: 'prod-casado', quantity: 1, selectedProtein: 'Pollo' }],
-        }),
-      });
-      assert.ok(
-        res.status === 400 || res.status === 403 || res.status === 503,
-        `Esperado 400/403/503 para token QR inválido, recibido ${res.status}`
-      );
+    await runTest('Todas las rutas de pedidos públicos retiradas responden HTTP 410 sin datos', async () => {
+      const routes = [
+        ['GET', '/api/public/menu?token=legacy'],
+        ['POST', '/api/public/order'],
+        ['GET', '/api/public/order-status/PK-LEGACY'],
+        ['POST', '/api/public/catalog-sync'],
+        ['GET', '/api/public/pending-orders'],
+        ['POST', '/api/public/pending-orders/PK-LEGACY/status'],
+      ];
+      for (const [method, route] of routes) {
+        const res = await fetch(`${baseUrl}${route}`, { method });
+        assert.equal(res.status, 410, route);
+        const body = await res.json();
+        assert.equal(body.success, false);
+        assert.equal('orders' in body || 'products' in body || 'order' in body, false);
+      }
     });
   } finally {
     await new Promise<void>(resolve => server.close(() => resolve()));
